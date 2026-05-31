@@ -1,0 +1,8 @@
+inherit_from: "configs/mono/tum/fr3_office.yaml"
+
+Training:
+  lifecycle:
+    enabled: False
+  dust3r:
+    enabled: False
+  mapping_itr_num: 80

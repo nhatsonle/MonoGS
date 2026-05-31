@@ -1,0 +1,13 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_baseline_gated.yaml"
+
+Training:
+  dust3r:
+    optimization:
+      enabled: True
+      min_keyframe_gap: 2
+      mapping_iters_with_dust3r: 5
+      mapping_iters_without_dust3r: 10
+      preinit_mapping_iters_with_dust3r: 20
+      initial_ba_iters_with_dust3r: 150
+      skip_densify_after_insert: 2
+      min_insert_points_for_fast_mapping: 256
