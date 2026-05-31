@@ -43,6 +43,17 @@ Training:
       rgb_residual_threshold: 0.12
       min_opacity_floor: 0.08
       min_points: 128
+    alignment:
+      enabled: False
+      required: False
+      min_points: 128
+      sample_points: 4096
+      ransac_iterations: 64
+      inlier_threshold: 0.08
+      max_rmse: 0.08
+      opacity_threshold: 0.65
+      min_scale_correction: 0.67
+      max_scale_correction: 1.50
     optimization:
       enabled: False
       min_keyframe_gap: 0
@@ -55,7 +66,7 @@ Training:
 
 Dataset:
   dataset_path: "datasets/tum/rgbd_dataset_freiburg3_long_office_household"
-  num_frames: -1
+  num_frames: 200
   Calibration:
     fx: 535.4
     fy: 539.2

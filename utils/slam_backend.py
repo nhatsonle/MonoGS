@@ -77,6 +77,27 @@ class BackEnd(mp.Process):
         )
         self.dust3r_min_opacity_floor = float(insertion.get("min_opacity_floor", 0.08))
         self.dust3r_min_insert_points = int(insertion.get("min_points", 128))
+        alignment = dust3r_config.get("alignment", {})
+        self.dust3r_alignment_enabled = bool(alignment.get("enabled", False))
+        self.dust3r_alignment_required = bool(alignment.get("required", False))
+        self.dust3r_alignment_min_points = int(alignment.get("min_points", 128))
+        self.dust3r_alignment_sample_points = int(alignment.get("sample_points", 4096))
+        self.dust3r_alignment_ransac_iters = int(
+            alignment.get("ransac_iterations", 64)
+        )
+        self.dust3r_alignment_inlier_threshold = float(
+            alignment.get("inlier_threshold", 0.08)
+        )
+        self.dust3r_alignment_max_rmse = float(alignment.get("max_rmse", 0.08))
+        self.dust3r_alignment_opacity_threshold = float(
+            alignment.get("opacity_threshold", 0.65)
+        )
+        self.dust3r_alignment_min_scale = float(
+            alignment.get("min_scale_correction", 0.67)
+        )
+        self.dust3r_alignment_max_scale = float(
+            alignment.get("max_scale_correction", 1.50)
+        )
         lifecycle_config = self.config["Training"].get("lifecycle", {})
         self.lifecycle_enabled = bool(lifecycle_config.get("enabled", False))
         self.lifecycle_prune_bad = bool(lifecycle_config.get("prune_bad", True))
@@ -121,6 +142,22 @@ class BackEnd(mp.Process):
             self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
 
+        world_frame_idx = dust3r_payload.get("world_frame_idx", frame_idx)
+        world_viewpoint = self.viewpoints.get(world_frame_idx, viewpoint)
+        transform = self.get_c2w_tensor(world_viewpoint)
+
+        if (
+            self.dust3r_alignment_enabled
+            and not init
+            and self.gaussians.get_xyz.shape[0] > 0
+        ):
+            dust3r_payload = self.align_dust3r_payload(
+                frame_idx, viewpoint, dust3r_payload, transform
+            )
+            if dust3r_payload is None:
+                self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+                return False, 0
+
         if (
             self.dust3r_insertion_enabled
             and not init
@@ -133,10 +170,6 @@ class BackEnd(mp.Process):
                 self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
                 return False, 0
 
-        world_frame_idx = dust3r_payload.get("world_frame_idx", frame_idx)
-        world_viewpoint = self.viewpoints.get(world_frame_idx, viewpoint)
-        transform = self.get_c2w_tensor(world_viewpoint)
-
         try:
             fused_point_cloud, features, scales, rots, opacities = (
                 self.gaussians.create_pcd_from_dust3r(
@@ -147,6 +180,7 @@ class BackEnd(mp.Process):
                     mask=dust3r_payload.get("masks"),
                     init=init,
                     pointmap_indices=dust3r_payload.get("pointmap_indices", [0]),
+                    alignment_transform=dust3r_payload.get("alignment_transform"),
                 )
             )
             inserted_points = fused_point_cloud.shape[0]
@@ -169,6 +203,217 @@ class BackEnd(mp.Process):
             Log(f"DUSt3R Gaussian init failed, falling back to depth init: {exc}")
             self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
+
+    def estimate_similarity_transform(self, source, target):
+        if source.shape[0] < 3 or target.shape[0] < 3:
+            return None
+
+        source_mean = source.mean(axis=0)
+        target_mean = target.mean(axis=0)
+        source_centered = source - source_mean
+        target_centered = target - target_mean
+        source_var = np.mean(np.sum(source_centered * source_centered, axis=1))
+        if source_var < 1e-12:
+            return None
+
+        covariance = (target_centered.T @ source_centered) / source.shape[0]
+        try:
+            u, singular_values, vt = np.linalg.svd(covariance)
+        except np.linalg.LinAlgError:
+            return None
+
+        sign = -1.0 if np.linalg.det(u @ vt) < 0 else 1.0
+        correction = np.diag([1.0, 1.0, sign])
+        rotation = u @ correction @ vt
+        scale = float(np.trace(np.diag(singular_values) @ correction) / source_var)
+        if not np.isfinite(scale) or scale <= 0:
+            return None
+        translation = target_mean - scale * rotation @ source_mean
+
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = scale * rotation
+        transform[:3, 3] = translation
+        return transform, scale
+
+    def robust_similarity_transform(self, source, target):
+        if source.shape[0] < self.dust3r_alignment_min_points:
+            return None, None, None, 0
+
+        rng = np.random.default_rng(0)
+        best_transform = None
+        best_scale = None
+        best_inliers = None
+        best_count = 0
+
+        for _ in range(self.dust3r_alignment_ransac_iters):
+            sample_idx = rng.choice(source.shape[0], size=3, replace=False)
+            estimate = self.estimate_similarity_transform(
+                source[sample_idx], target[sample_idx]
+            )
+            if estimate is None:
+                continue
+            transform, scale = estimate
+            transformed = self.apply_similarity(source, transform)
+            residual = np.linalg.norm(transformed - target, axis=1)
+            inliers = residual < self.dust3r_alignment_inlier_threshold
+            count = int(inliers.sum())
+            if count > best_count:
+                best_transform = transform
+                best_scale = scale
+                best_inliers = inliers
+                best_count = count
+
+        if best_inliers is None or best_count < self.dust3r_alignment_min_points:
+            return None, None, None, best_count
+
+        refined = self.estimate_similarity_transform(
+            source[best_inliers], target[best_inliers]
+        )
+        if refined is None:
+            return None, None, None, best_count
+        best_transform, best_scale = refined
+        transformed = self.apply_similarity(source[best_inliers], best_transform)
+        residual = np.linalg.norm(transformed - target[best_inliers], axis=1)
+        rmse = float(np.sqrt(np.mean(residual * residual)))
+        return best_transform, best_scale, rmse, best_count
+
+    def apply_similarity(self, points, transform):
+        return points @ transform[:3, :3].T + transform[:3, 3]
+
+    def build_dust3r_alignment_pairs(self, viewpoint, dust3r_payload, base_transform):
+        pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
+        if 0 not in pointmap_indices:
+            return None, None
+
+        render_pkg = render(
+            viewpoint, self.gaussians, self.pipeline_params, self.background
+        )
+        depth = render_pkg["depth"].detach()
+        opacity = render_pkg["opacity"].detach()
+        if depth.dim() == 2:
+            depth = depth[None]
+        if opacity.dim() == 2:
+            opacity = opacity[None]
+
+        pts3d = dust3r_payload["pts3d"][0]
+        if hasattr(pts3d, "detach"):
+            pts3d = pts3d.detach().cpu().numpy()
+        else:
+            pts3d = np.asarray(pts3d)
+        target_h, target_w = pts3d.shape[:2]
+
+        depth_r = F.interpolate(
+            depth[None],
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
+        opacity_r = F.interpolate(
+            opacity[None],
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
+        depth_np = depth_r.cpu().numpy()
+        opacity_np = opacity_r.cpu().numpy()
+
+        dust3r_config = self.config["Training"].get("dust3r", {})
+        depth_min = float(dust3r_config.get("depth_min", 0.05))
+        depth_max = float(dust3r_config.get("depth_max", 20.0))
+        scale = float(dust3r_payload.get("scale", 1.0))
+        if not np.isfinite(scale) or abs(scale) < 1e-8:
+            scale = 1.0
+
+        valid = np.isfinite(pts3d).all(axis=-1)
+        valid = np.logical_and(valid, pts3d[..., 2] > depth_min)
+        valid = np.logical_and(valid, pts3d[..., 2] < depth_max)
+        valid = np.logical_and(valid, np.isfinite(depth_np))
+        valid = np.logical_and(valid, depth_np > depth_min)
+        valid = np.logical_and(valid, depth_np < depth_max)
+        valid = np.logical_and(
+            valid, opacity_np > self.dust3r_alignment_opacity_threshold
+        )
+        masks = dust3r_payload.get("masks")
+        if masks is not None and masks[0] is not None:
+            valid = np.logical_and(valid, np.asarray(masks[0]).astype(bool))
+
+        if int(valid.sum()) < self.dust3r_alignment_min_points:
+            return None, None
+
+        ys, xs = np.nonzero(valid)
+        if ys.shape[0] > self.dust3r_alignment_sample_points:
+            rng = np.random.default_rng(1)
+            keep = rng.choice(
+                ys.shape[0], size=self.dust3r_alignment_sample_points, replace=False
+            )
+            ys = ys[keep]
+            xs = xs[keep]
+
+        source = pts3d[ys, xs].reshape(-1, 3).astype(np.float64) / scale
+        if hasattr(base_transform, "detach"):
+            base_transform = base_transform.detach().cpu().numpy()
+        base_transform = np.asarray(base_transform, dtype=np.float64)
+        source = source @ base_transform[:3, :3].T + base_transform[:3, 3]
+
+        z = depth_np[ys, xs].astype(np.float64)
+        sx = target_w / float(viewpoint.image_width)
+        sy = target_h / float(viewpoint.image_height)
+        fx = viewpoint.fx * sx
+        fy = viewpoint.fy * sy
+        cx = viewpoint.cx * sx
+        cy = viewpoint.cy * sy
+        x = (xs.astype(np.float64) - cx) / fx * z
+        y = (ys.astype(np.float64) - cy) / fy * z
+        target_cam = np.stack((x, y, z), axis=1)
+        target_c2w = self.get_c2w_tensor(viewpoint).detach().cpu().numpy()
+        target = target_cam @ target_c2w[:3, :3].T + target_c2w[:3, 3]
+        return source, target
+
+    def align_dust3r_payload(self, frame_idx, viewpoint, dust3r_payload, base_transform):
+        source, target = self.build_dust3r_alignment_pairs(
+            viewpoint, dust3r_payload, base_transform
+        )
+        if source is None:
+            Log(
+                f"Skipping DUSt3R Sim3 alignment for kf {frame_idx}: "
+                "not enough reliable rendered-depth correspondences"
+            )
+            if self.dust3r_alignment_required:
+                return None
+            return dust3r_payload
+
+        transform, scale, rmse, inliers = self.robust_similarity_transform(
+            source, target
+        )
+        if transform is None or rmse is None:
+            Log(f"Skipping DUSt3R Sim3 alignment for kf {frame_idx}: RANSAC failed")
+            if self.dust3r_alignment_required:
+                return None
+            return dust3r_payload
+
+        if (
+            rmse > self.dust3r_alignment_max_rmse
+            or scale < self.dust3r_alignment_min_scale
+            or scale > self.dust3r_alignment_max_scale
+        ):
+            Log(
+                f"Rejecting DUSt3R Sim3 alignment for kf {frame_idx}: "
+                f"rmse={rmse:.4f}, scale={scale:.4f}, inliers={inliers}"
+            )
+            if self.dust3r_alignment_required:
+                return None
+            return dust3r_payload
+
+        Log(
+            f"DUSt3R Sim3 alignment kf {frame_idx}: "
+            f"rmse={rmse:.4f}, scale={scale:.4f}, inliers={inliers}/{source.shape[0]}"
+        )
+        dust3r_payload = dict(dust3r_payload)
+        dust3r_payload["alignment_transform"] = transform
+        dust3r_payload["alignment_rmse"] = rmse
+        dust3r_payload["alignment_scale"] = scale
+        dust3r_payload["alignment_inliers"] = inliers
+        return dust3r_payload
 
     def apply_dust3r_insertion_mask(self, frame_idx, viewpoint, dust3r_payload):
         render_pkg = render(

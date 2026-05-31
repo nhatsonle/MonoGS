@@ -206,7 +206,61 @@ Relevant file:
 
 - `gaussian_splatting/scene/gaussian_model.py`
 
-## 8. Coverage/Residual-Guided DUSt3R Insertion
+## 8. DUSt3R-to-MonoGS Sim3 Alignment Gate
+
+The backend can now align DUSt3R pointmaps to the current MonoGS map before
+inserting Gaussians.
+
+Pipeline:
+
+1. Render the current Gaussian map from the new keyframe pose.
+2. Keep rendered-depth correspondences only where opacity is high enough.
+3. Pair DUSt3R pointmap pixels with rendered-depth 3D points from MonoGS.
+4. Estimate a robust Sim3 correction with RANSAC + Umeyama.
+5. Reject DUSt3R insertion if the alignment has too few inliers, high RMSE, or
+   an excessive scale correction.
+6. Apply the accepted Sim3 correction after the baseline scale normalization and
+   before Gaussian insertion.
+
+Config:
+
+```yaml
+Training:
+  dust3r:
+    alignment:
+      enabled: True
+      required: True
+      min_points: 96
+      sample_points: 4096
+      ransac_iterations: 64
+      inlier_threshold: 0.08
+      max_rmse: 0.08
+      opacity_threshold: 0.65
+      min_scale_correction: 0.67
+      max_scale_correction: 1.50
+```
+
+Expected logs:
+
+```text
+DUSt3R Sim3 alignment kf ...: rmse=..., scale=..., inliers=.../...
+Rejecting DUSt3R Sim3 alignment ...
+Skipping DUSt3R Sim3 alignment ...
+```
+
+Impact:
+
+- Replaces pure baseline-ratio scaling with a map-aware Sim3 correction.
+- Filters out DUSt3R pointmaps that do not agree with the existing MonoGS map.
+- Reduces the chance of duplicate, blurred, or floating Gaussians from scale or
+  pose mismatch.
+
+Relevant files:
+
+- `utils/slam_backend.py`
+- `gaussian_splatting/scene/gaussian_model.py`
+
+## 9. Coverage/Residual-Guided DUSt3R Insertion
 
 The backend can optionally render the current Gaussian map from the new keyframe
 pose before inserting DUSt3R points.
@@ -240,7 +294,7 @@ Relevant file:
 
 - `utils/slam_backend.py`
 
-## 9. DUSt3R-Aware Optimization Scheduler
+## 10. DUSt3R-Aware Optimization Scheduler
 
 The backend can now use a successful DUSt3R insertion as a signal to reduce
 optimization work for that keyframe.
@@ -285,7 +339,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `configs/mono/tum/ablations/fr3_office_07_dust3r_adaptive_optimization.yaml`
 
-## 10. Online Gaussian Lifecycle Controller
+## 11. Online Gaussian Lifecycle Controller
 
 The system now includes an optional online lifecycle controller for Gaussians.
 It manages each Gaussian as one of four states:
@@ -356,7 +410,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `configs/mono/tum/fr3_office.yaml`
 
-## 11. Ablation Configs
+## 12. Ablation Configs
 
 Dedicated ablation configs were added under:
 
@@ -389,8 +443,8 @@ fr3_office_06_dust3r_baseline_gated_lifecycle.yaml
   DUSt3R baseline-gated config plus lifecycle controller.
 
 fr3_office_07_dust3r_adaptive_optimization.yaml
-  DUSt3R baseline-gated config plus adaptive mapping iterations, keyframe-gap
-  throttling, and post-insertion densify skipping.
+  DUSt3R baseline-gated config plus Sim3 alignment gate, adaptive mapping
+  iterations, keyframe-gap throttling, and post-insertion densify skipping.
 ```
 
 A helper script runs all ablations and stores logs:
@@ -404,7 +458,7 @@ Relevant files:
 - `configs/mono/tum/ablations/*.yaml`
 - `scripts/run_fr3_office_ablations.sh`
 
-## 12. Observed Behavior So Far
+## 13. Observed Behavior So Far
 
 From the available 200-frame `fr3_office` runs:
 
