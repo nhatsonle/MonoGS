@@ -1,0 +1,7 @@
+inherit_from: "configs/mono/kitti/base_config.yaml"
+
+Dataset:
+  dataset_path: "datasets/kitti/dataset/sequences/00"
+  pose_path: "datasets/kitti/dataset/poses/00.txt"
+  camera: "image_2"
+  projection_key: "P2"

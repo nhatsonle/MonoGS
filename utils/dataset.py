@@ -16,6 +16,41 @@ except Exception:
     pass
 
 
+class WaymoParser:
+    def __init__(self, input_folder):
+        self.input_folder = input_folder
+        self.color_paths = sorted(glob.glob(f"{self.input_folder}/rgb/*.png"))
+        self.depth_paths = sorted(glob.glob(f"{self.input_folder}/depth/*.png"))
+        self.n_img = len(self.color_paths)
+        if self.n_img == 0:
+            raise FileNotFoundError(f"No Waymo RGB images found in {input_folder}/rgb")
+        self.load_poses(f"{self.input_folder}/gt/*.txt")
+
+    def load_poses(self, path):
+        self.poses = []
+        self.frames = []
+        pose_files = sorted(glob.glob(path))
+        if len(pose_files) < self.n_img:
+            raise FileNotFoundError(
+                f"Expected at least {self.n_img} Waymo pose files matching {path}, "
+                f"found {len(pose_files)}"
+            )
+
+        for i in range(self.n_img):
+            c2w = np.loadtxt(pose_files[i], delimiter=" ").reshape(4, 4)
+            w2c = np.linalg.inv(c2w)
+            self.poses.append(w2c)
+            self.frames.append(
+                {
+                    "file_path": self.color_paths[i],
+                    "depth_path": self.depth_paths[i]
+                    if i < len(self.depth_paths)
+                    else None,
+                    "transform_matrix": w2c.tolist(),
+                }
+            )
+
+
 class ReplicaParser:
     def __init__(self, input_folder):
         self.input_folder = input_folder
@@ -190,6 +225,92 @@ class EuRoCParser:
         self.frames = frames
 
 
+class KITTIParser:
+    def __init__(self, input_folder, camera="image_2", pose_path=None):
+        self.input_folder = input_folder
+        self.camera = camera
+        self.color_paths = self.find_image_paths(input_folder, camera)
+        self.n_img = len(self.color_paths)
+        if self.n_img == 0:
+            raise FileNotFoundError(
+                f"No KITTI images found in {input_folder}/{camera}"
+            )
+
+        self.calib = self.load_calibration(os.path.join(input_folder, "calib.txt"))
+        if pose_path is None:
+            pose_path = self.infer_pose_path(input_folder)
+        self.load_poses(pose_path)
+
+    def find_image_paths(self, input_folder, camera):
+        camera_folder = os.path.join(input_folder, camera)
+        if os.path.isdir(camera_folder):
+            search_folder = camera_folder
+        else:
+            search_folder = input_folder
+        image_paths = []
+        for ext in ("*.png", "*.jpg", "*.jpeg"):
+            image_paths.extend(glob.glob(os.path.join(search_folder, ext)))
+        return sorted(image_paths)
+
+    def infer_pose_path(self, input_folder):
+        sequence = os.path.basename(os.path.normpath(input_folder))
+        candidates = [
+            os.path.join(input_folder, "poses.txt"),
+            os.path.join(input_folder, f"{sequence}.txt"),
+            os.path.join(os.path.dirname(input_folder), "poses", f"{sequence}.txt"),
+            os.path.join(
+                os.path.dirname(os.path.dirname(input_folder)),
+                "poses",
+                f"{sequence}.txt",
+            ),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        raise FileNotFoundError(
+            "KITTI pose file not found. Set Dataset.pose_path in the config."
+        )
+
+    def load_calibration(self, path):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"KITTI calibration file not found: {path}")
+        calib = {}
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                values = np.fromstring(value, sep=" ")
+                if values.size == 12:
+                    calib[key] = values.reshape(3, 4)
+                else:
+                    calib[key] = values
+        return calib
+
+    def load_poses(self, path):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"KITTI pose file not found: {path}")
+        self.poses = []
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines[: self.n_img]:
+            values = np.fromstring(line, sep=" ")
+            if values.size != 12:
+                raise ValueError(f"Invalid KITTI pose line in {path}: {line}")
+            c2w = np.eye(4)
+            c2w[:3, :4] = values.reshape(3, 4)
+            self.poses.append(np.linalg.inv(c2w))
+        self.n_img = min(self.n_img, len(self.poses))
+        self.color_paths = self.color_paths[: self.n_img]
+        self.frames = [
+            {
+                "file_path": self.color_paths[i],
+                "transform_matrix": self.poses[i].tolist(),
+            }
+            for i in range(self.n_img)
+        ]
+
+
 class BaseDataset(torch.utils.data.Dataset):
     def __init__(self, args, path, config):
         self.args = args
@@ -210,13 +331,19 @@ class MonocularDataset(BaseDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
         calibration = config["Dataset"]["Calibration"]
-        # Camera prameters
-        self.fx = calibration["fx"]
-        self.fy = calibration["fy"]
-        self.cx = calibration["cx"]
-        self.cy = calibration["cy"]
-        self.width = calibration["width"]
-        self.height = calibration["height"]
+        full_fx = calibration["fx"]
+        full_fy = calibration["fy"]
+        full_cx = calibration["cx"]
+        full_cy = calibration["cy"]
+        self.full_width = calibration["width"]
+        self.full_height = calibration["height"]
+        self.downscale = max(1, int(config["Dataset"].get("downscale", 1)))
+        self.fx = full_fx / self.downscale
+        self.fy = full_fy / self.downscale
+        self.cx = full_cx / self.downscale
+        self.cy = full_cy / self.downscale
+        self.width = self.full_width // self.downscale
+        self.height = self.full_height // self.downscale
         self.fovx = focal2fov(self.fx, self.width)
         self.fovy = focal2fov(self.fy, self.height)
         self.K = np.array(
@@ -233,16 +360,24 @@ class MonocularDataset(BaseDataset):
                 calibration["k3"],
             ]
         )
+        full_K = np.array(
+            [
+                [full_fx, 0.0, full_cx],
+                [0.0, full_fy, full_cy],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         self.map1x, self.map1y = cv2.initUndistortRectifyMap(
-            self.K,
+            full_K,
             self.dist_coeffs,
             np.eye(3),
-            self.K,
-            (self.width, self.height),
+            full_K,
+            (self.full_width, self.full_height),
             cv2.CV_32FC1,
         )
         # depth parameters
-        self.has_depth = True if "depth_scale" in calibration.keys() else False
+        self.use_depth = bool(config["Dataset"].get("use_depth", True))
+        self.has_depth = self.use_depth and "depth_scale" in calibration.keys()
         self.depth_scale = calibration["depth_scale"] if self.has_depth else None
 
         # Default scene scale
@@ -264,9 +399,20 @@ class MonocularDataset(BaseDataset):
         if self.disorted:
             image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
 
+        if self.downscale > 1:
+            image = cv2.resize(
+                image, (self.width, self.height), interpolation=cv2.INTER_AREA
+            )
+
         if self.has_depth:
             depth_path = self.depth_paths[idx]
             depth = np.array(Image.open(depth_path)) / self.depth_scale
+            if self.downscale > 1:
+                depth = cv2.resize(
+                    depth,
+                    (self.width, self.height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
 
         image = (
             torch.from_numpy(image / 255.0)
@@ -429,6 +575,80 @@ class EurocDataset(StereoDataset):
         self.poses = parser.poses
 
 
+class WaymoDataset(MonocularDataset):
+    def __init__(self, args, path, config):
+        super().__init__(args, path, config)
+        dataset_path = config["Dataset"]["dataset_path"]
+        parser = WaymoParser(dataset_path)
+        num_frames = config["Dataset"].get("num_frames", parser.n_img)
+        if num_frames is None or num_frames <= 0:
+            num_frames = parser.n_img
+        self.num_imgs = min(num_frames, parser.n_img)
+        self.color_paths = parser.color_paths[: self.num_imgs]
+        self.depth_paths = parser.depth_paths[: self.num_imgs]
+        self.poses = parser.poses[: self.num_imgs]
+
+
+class KITTIDataset(BaseDataset):
+    def __init__(self, args, path, config):
+        super().__init__(args, path, config)
+        dataset_config = config["Dataset"]
+        dataset_path = dataset_config["dataset_path"]
+        camera = dataset_config.get("camera", "image_2")
+        pose_path = dataset_config.get("pose_path")
+        parser = KITTIParser(dataset_path, camera=camera, pose_path=pose_path)
+
+        projection_key = dataset_config.get("projection_key", "P2")
+        if projection_key not in parser.calib:
+            raise KeyError(
+                f"KITTI calibration key {projection_key} not found in calib.txt"
+            )
+        projection = parser.calib[projection_key]
+        self.fx = float(projection[0, 0])
+        self.fy = float(projection[1, 1])
+        self.cx = float(projection[0, 2])
+        self.cy = float(projection[1, 2])
+
+        first_image = Image.open(parser.color_paths[0])
+        self.width, self.height = first_image.size
+        first_image.close()
+        if "Calibration" in dataset_config:
+            calibration = dataset_config["Calibration"]
+            self.width = calibration.get("width", self.width)
+            self.height = calibration.get("height", self.height)
+
+        self.fovx = focal2fov(self.fx, self.width)
+        self.fovy = focal2fov(self.fy, self.height)
+        self.K = np.array(
+            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]]
+        )
+        self.disorted = False
+        self.has_depth = False
+        self.depth_scale = None
+
+        num_frames = dataset_config.get("num_frames", parser.n_img)
+        if num_frames is None or num_frames <= 0:
+            num_frames = parser.n_img
+        self.num_imgs = min(num_frames, parser.n_img)
+        self.color_paths = parser.color_paths[: self.num_imgs]
+        self.poses = parser.poses[: self.num_imgs]
+
+    def __getitem__(self, idx):
+        image = np.array(Image.open(self.color_paths[idx]))
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.shape[2] == 4:
+            image = image[:, :, :3]
+        image = (
+            torch.from_numpy(image / 255.0)
+            .clamp(0.0, 1.0)
+            .permute(2, 0, 1)
+            .to(device=self.device, dtype=self.dtype)
+        )
+        pose = torch.from_numpy(self.poses[idx]).to(device=self.device)
+        return image, None, pose
+
+
 class RealsenseDataset(BaseDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
@@ -529,6 +749,10 @@ def load_dataset(args, path, config):
         return ReplicaDataset(args, path, config)
     elif config["Dataset"]["type"] == "euroc":
         return EurocDataset(args, path, config)
+    elif config["Dataset"]["type"] == "kitti":
+        return KITTIDataset(args, path, config)
+    elif config["Dataset"]["type"] == "waymo":
+        return WaymoDataset(args, path, config)
     elif config["Dataset"]["type"] == "realsense":
         return RealsenseDataset(args, path, config)
     else:

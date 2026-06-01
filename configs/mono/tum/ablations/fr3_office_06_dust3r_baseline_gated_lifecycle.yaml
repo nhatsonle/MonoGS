@@ -1,4 +1,4 @@
-inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_baseline_gated.yaml"
+inherit_from: "configs/mono/tum/ablations/fr3_office_02_dust3r_reduced_mapping_no_insertion.yaml"
 
 Training:
   lifecycle:

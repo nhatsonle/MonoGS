@@ -14,6 +14,7 @@ import os
 import numpy as np
 import open3d as o3d
 import torch
+import torch.nn.functional as F
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
@@ -303,14 +304,16 @@ class GaussianModel:
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
+        if new_xyz.shape[0] == 0:
+            raise ValueError("Image/depth point cloud is empty after downsampling")
 
         pcd = BasicPointCloud(
             points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
         )
         self.ply_input = pcd
 
-        fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
+        fused_point_cloud = torch.from_numpy(new_xyz).float().cuda()
+        fused_color = RGB2SH(torch.from_numpy(new_rgb).float().cuda())
         features = (
             torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
             .float()
@@ -321,7 +324,7 @@ class GaussianModel:
 
         dist2 = (
             torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+                distCUDA2(fused_point_cloud),
                 0.0000001,
             )
             * point_size
@@ -358,6 +361,12 @@ class GaussianModel:
             downsample_factor = self.config["Dataset"]["pcd_downsample"]
         point_size = self.config["Dataset"]["point_size"]
         dust3r_config = self.config["Training"].get("dust3r", {})
+        dust3r_init_config = dust3r_config.get("init", {})
+        if init:
+            downsample_factor = int(
+                dust3r_init_config.get("pcd_downsample", downsample_factor)
+            )
+            point_size *= float(dust3r_init_config.get("point_size_scale", 1.0))
         depth_min = float(dust3r_config.get("depth_min", 0.05))
         depth_max = float(dust3r_config.get("depth_max", 20.0))
         max_radius = float(dust3r_config.get("max_point_radius", 30.0))
@@ -365,6 +374,13 @@ class GaussianModel:
         outlier_enabled = bool(outlier_config.get("enabled", True))
         outlier_nb_neighbors = int(outlier_config.get("nb_neighbors", 20))
         outlier_std_ratio = float(outlier_config.get("std_ratio", 2.0))
+        scale = float(scale)
+        if not np.isfinite(scale) or abs(scale) < 1e-8:
+            scale = 1.0
+        filter_scale = abs(scale)
+        filter_depth_min = depth_min * filter_scale
+        filter_depth_max = depth_max * filter_scale
+        filter_max_radius = max_radius * filter_scale
 
         pts3d = [
             p.detach().cpu().numpy() if hasattr(p, "detach") else np.asarray(p)
@@ -381,22 +397,48 @@ class GaussianModel:
 
         pts_chunks = []
         color_chunks = []
+        stats = []
         for idx in pointmap_indices:
             points = pts3d[idx]
             colors = imgs[idx]
-            valid = np.isfinite(points).all(axis=-1)
-            valid = np.logical_and(valid, points[..., 2] > depth_min)
-            valid = np.logical_and(valid, points[..., 2] < depth_max)
-            valid = np.logical_and(valid, np.linalg.norm(points, axis=-1) < max_radius)
+            finite = np.isfinite(points).all(axis=-1)
+            z_min = float(np.nanmin(points[..., 2])) if np.any(finite) else float("nan")
+            z_max = float(np.nanmax(points[..., 2])) if np.any(finite) else float("nan")
+            radius = np.linalg.norm(points, axis=-1)
+            valid = finite
+            valid = np.logical_and(valid, points[..., 2] > filter_depth_min)
+            valid = np.logical_and(valid, points[..., 2] < filter_depth_max)
+            valid = np.logical_and(valid, radius < filter_max_radius)
             if mask is not None and mask[idx] is not None:
                 valid = np.logical_and(valid, mask[idx])
+            stats.append(
+                (
+                    idx,
+                    int(points.shape[0] * points.shape[1]),
+                    int(np.count_nonzero(finite)),
+                    int(np.count_nonzero(valid)),
+                    z_min,
+                    z_max,
+                )
+            )
             if not np.any(valid):
                 continue
             pts_chunks.append(points[valid].reshape(-1, 3))
             color_chunks.append(colors[valid].reshape(-1, 3))
 
         if not pts_chunks:
-            raise ValueError("DUSt3R did not produce any valid points for Gaussian init")
+            stat_msg = ", ".join(
+                f"idx {idx}: valid {valid}/{total}, finite {finite}, z [{z_min:.3f}, {z_max:.3f}]"
+                for idx, total, finite, valid, z_min, z_max in stats
+            )
+            raise ValueError(
+                "DUSt3R did not produce any valid points for Gaussian init "
+                f"(metric depth range [{depth_min}, {depth_max}], "
+                f"metric max radius {max_radius}, scale divisor {scale}; "
+                f"DUSt3R filter depth range [{filter_depth_min}, {filter_depth_max}], "
+                f"filter max radius {filter_max_radius}; "
+                f"{stat_msg})"
+            )
 
         points = np.concatenate(pts_chunks, axis=0)
         colors = np.concatenate(color_chunks, axis=0).astype(np.float32)
@@ -404,9 +446,6 @@ class GaussianModel:
             colors = colors / 255.0
         colors = np.clip(colors, 0.0, 1.0)
 
-        scale = float(scale)
-        if not np.isfinite(scale) or abs(scale) < 1e-8:
-            scale = 1.0
         points = points * (1.0 / scale)
 
         pcd = o3d.geometry.PointCloud()
@@ -448,6 +487,196 @@ class GaussianModel:
         features[:, 3:, 1:] = 0.0
 
         dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 0.0000001) * point_size
+        scales = torch.log(torch.sqrt(dist2))[..., None]
+        if not self.isotropic:
+            scales = scales.repeat(1, 3)
+
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+        opacities = inverse_sigmoid(
+            0.5
+            * torch.ones(
+                (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
+            )
+        )
+
+        return fused_point_cloud, features, scales, rots, opacities
+
+    def create_pcd_from_dust3r_depth(
+        self,
+        cam,
+        depthmaps,
+        scale=1.0,
+        mask=None,
+        init=False,
+        pointmap_index=0,
+    ):
+        if init:
+            downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
+        else:
+            downsample_factor = self.config["Dataset"]["pcd_downsample"]
+        point_size = self.config["Dataset"]["point_size"]
+        dust3r_config = self.config["Training"].get("dust3r", {})
+        dust3r_init_config = dust3r_config.get("init", {})
+        if init:
+            downsample_factor = int(
+                dust3r_init_config.get("pcd_downsample", downsample_factor)
+            )
+            point_size *= float(dust3r_init_config.get("point_size_scale", 1.0))
+        depth_min = float(dust3r_config.get("depth_min", 0.05))
+        depth_max = float(dust3r_config.get("depth_max", 20.0))
+        use_confidence_mask = bool(
+            dust3r_init_config.get("use_confidence_mask", True)
+        )
+        fill_invalid_depth = bool(
+            dust3r_init_config.get("fill_invalid_depth", False)
+        )
+        invalid_depth = float(dust3r_init_config.get("invalid_depth", 2.0))
+        invalid_depth_noise = float(
+            dust3r_init_config.get("invalid_depth_noise", 0.05)
+        )
+        sample_stride = int(dust3r_init_config.get("sample_stride", 0))
+        gradient_extra_samples = bool(
+            dust3r_init_config.get("gradient_extra_samples", False)
+        )
+        gradient_threshold = float(
+            dust3r_init_config.get("gradient_threshold", 0.08)
+        )
+        gradient_stride = int(dust3r_init_config.get("gradient_stride", 1))
+        max_points = int(dust3r_init_config.get("max_points", 200000))
+        use_pixel_footprint_scale = bool(
+            dust3r_init_config.get("use_pixel_footprint_scale", True)
+        )
+        pixel_footprint_scale = float(
+            dust3r_init_config.get("pixel_footprint_scale", 0.75)
+        )
+
+        scale = float(scale)
+        if not np.isfinite(scale) or abs(scale) < 1e-8:
+            scale = 1.0
+
+        depth = depthmaps[pointmap_index]
+        depth = depth.detach().cpu().numpy() if hasattr(depth, "detach") else np.asarray(depth)
+        depth_t = torch.from_numpy(depth.astype(np.float32))[None, None]
+        depth_t = F.interpolate(
+            depth_t,
+            size=(cam.image_height, cam.image_width),
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
+        depth_t = depth_t / scale
+
+        dust3r_valid = torch.isfinite(depth_t)
+        dust3r_valid = torch.logical_and(dust3r_valid, depth_t > depth_min)
+        dust3r_valid = torch.logical_and(dust3r_valid, depth_t < depth_max)
+        if (
+            use_confidence_mask
+            and mask is not None
+            and mask[pointmap_index] is not None
+        ):
+            mask_np = np.asarray(mask[pointmap_index]).astype(np.float32)
+            mask_t = torch.from_numpy(mask_np)[None, None]
+            mask_t = F.interpolate(
+                mask_t,
+                size=(cam.image_height, cam.image_width),
+                mode="nearest",
+            )[0, 0].bool()
+            dust3r_valid = torch.logical_and(dust3r_valid, mask_t)
+
+        valid = dust3r_valid
+        if fill_invalid_depth:
+            fill_mask = ~dust3r_valid
+            if invalid_depth_noise > 0:
+                noise = (
+                    torch.rand_like(depth_t) - 0.5
+                ) * invalid_depth_noise
+            else:
+                noise = torch.zeros_like(depth_t)
+            depth_t = torch.where(fill_mask, invalid_depth + noise, depth_t)
+            valid = torch.isfinite(depth_t)
+            valid = torch.logical_and(valid, depth_t > 0)
+            valid = torch.logical_and(valid, depth_t < depth_max)
+
+        if sample_stride > 1:
+            grid_mask = torch.zeros_like(valid, dtype=torch.bool)
+            grid_mask[::sample_stride, ::sample_stride] = True
+            sample_mask = torch.logical_and(valid, grid_mask)
+            if gradient_extra_samples:
+                gray = cam.original_image.detach().cpu().mean(dim=0)
+                grad_y = torch.zeros_like(gray)
+                grad_x = torch.zeros_like(gray)
+                grad_y[1:-1, :] = torch.abs(gray[2:, :] - gray[:-2, :]) * 0.5
+                grad_x[:, 1:-1] = torch.abs(gray[:, 2:] - gray[:, :-2]) * 0.5
+                grad = torch.sqrt(grad_x * grad_x + grad_y * grad_y)
+                edge_mask = grad > gradient_threshold
+                if gradient_stride > 1:
+                    edge_grid = torch.zeros_like(edge_mask, dtype=torch.bool)
+                    edge_grid[::gradient_stride, ::gradient_stride] = True
+                    edge_mask = torch.logical_and(edge_mask, edge_grid)
+                sample_mask = torch.logical_or(
+                    sample_mask, torch.logical_and(valid, edge_mask)
+                )
+            valid = sample_mask
+
+        ys, xs = torch.where(valid)
+        if ys.numel() == 0:
+            raise ValueError("DUSt3R depth map did not produce valid backprojected points")
+
+        z = depth_t[ys, xs]
+        x = (xs.float() - cam.cx) * z / cam.fx
+        y = (ys.float() - cam.cy) * z / cam.fy
+        points_cam = torch.stack((x, y, z), dim=1).to(device="cuda")
+
+        c2w = torch.linalg.inv(getWorld2View2(cam.R, cam.T)).to(device="cuda")
+        points_h = torch.cat(
+            (points_cam, torch.ones((points_cam.shape[0], 1), device="cuda")), dim=1
+        )
+        fused_point_cloud = (points_h @ c2w.transpose(0, 1))[:, :3]
+
+        colors_img = cam.original_image.permute(1, 2, 0).detach().cpu()
+        colors = colors_img[ys, xs].float().to(device="cuda")
+
+        if max_points > 0 and fused_point_cloud.shape[0] > max_points:
+            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:max_points]
+            fused_point_cloud = fused_point_cloud[perm]
+            colors = colors[perm]
+            z = z.to(device="cuda")[perm]
+        elif sample_stride <= 1 and downsample_factor > 1 and fused_point_cloud.shape[0] > downsample_factor:
+            keep_count = max(1, fused_point_cloud.shape[0] // downsample_factor)
+            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:keep_count]
+            fused_point_cloud = fused_point_cloud[perm]
+            colors = colors[perm]
+            z = z.to(device="cuda")[perm]
+        else:
+            z = z.to(device="cuda")
+
+        pcd_obj = BasicPointCloud(
+            points=fused_point_cloud.detach().cpu().numpy(),
+            colors=colors.detach().cpu().numpy(),
+            normals=np.zeros((fused_point_cloud.shape[0], 3)),
+        )
+        self.ply_input = pcd_obj
+
+        fused_color = RGB2SH(colors)
+        features = (
+            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
+            .float()
+            .cuda()
+        )
+        features[:, :3, 0] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        if use_pixel_footprint_scale:
+            effective_stride = max(1, sample_stride)
+            pixel_radius = (
+                z
+                * max(1.0 / float(cam.fx), 1.0 / float(cam.fy))
+                * effective_stride
+                * pixel_footprint_scale
+            )
+            dist2 = torch.clamp_min(pixel_radius * pixel_radius, 0.0000001)
+        else:
+            dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 0.0000001) * point_size
         scales = torch.log(torch.sqrt(dist2))[..., None]
         if not self.isotropic:
             scales = scales.repeat(1, 3)

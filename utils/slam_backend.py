@@ -106,6 +106,17 @@ class BackEnd(mp.Process):
         self.dust3r_optimization_enabled = bool(
             dust3r_optimization.get("enabled", False)
         )
+        dust3r_init = dust3r_config.get("init", {})
+        self.dust3r_init_backproject = bool(
+            dust3r_init.get("backproject_depth", False)
+        )
+        self.dust3r_init_prior_only = bool(dust3r_init.get("prior_only", False))
+        self.dust3r_init_depth_prior_weight = float(
+            dust3r_init.get("depth_prior_weight", 0.0)
+        )
+        self.dust3r_init_depth_prior_opacity_threshold = float(
+            dust3r_init.get("depth_prior_opacity_threshold", 0.2)
+        )
         self.dust3r_mapping_iters_with = int(
             dust3r_optimization.get("mapping_iters_with_dust3r", 5)
         )
@@ -131,6 +142,18 @@ class BackEnd(mp.Process):
             viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map
         )
 
+    def try_add_next_kf(
+        self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None
+    ):
+        try:
+            self.add_next_kf(
+                frame_idx, viewpoint, init=init, scale=scale, depth_map=depth_map
+            )
+            return True
+        except Exception as exc:
+            Log(f"Depth Gaussian init failed for kf {frame_idx}: {exc}")
+            return False
+
     def get_c2w_tensor(self, viewpoint):
         w2c = getWorld2View2(viewpoint.R, viewpoint.T)
         return torch.linalg.inv(w2c).to(self.device)
@@ -138,13 +161,20 @@ class BackEnd(mp.Process):
     def add_next_kf_from_dust3r(
         self, frame_idx, viewpoint, dust3r_payload, init=False, depth_map=None
     ):
-        if dust3r_payload is None:
-            self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+        if dust3r_payload is None or dust3r_payload.get("regularization_only", False):
+            self.try_add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
 
         world_frame_idx = dust3r_payload.get("world_frame_idx", frame_idx)
-        world_viewpoint = self.viewpoints.get(world_frame_idx, viewpoint)
-        transform = self.get_c2w_tensor(world_viewpoint)
+        world_viewpoint = self.viewpoints.get(world_frame_idx)
+        if world_viewpoint is not None:
+            transform = self.get_c2w_tensor(world_viewpoint)
+        elif "world_R" in dust3r_payload and "world_T" in dust3r_payload:
+            transform = torch.linalg.inv(
+                getWorld2View2(dust3r_payload["world_R"], dust3r_payload["world_T"])
+            ).to(self.device)
+        else:
+            transform = self.get_c2w_tensor(viewpoint)
 
         if (
             self.dust3r_alignment_enabled
@@ -155,7 +185,9 @@ class BackEnd(mp.Process):
                 frame_idx, viewpoint, dust3r_payload, transform
             )
             if dust3r_payload is None:
-                self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+                self.try_add_next_kf(
+                    frame_idx, viewpoint, init=init, depth_map=depth_map
+                )
                 return False, 0
 
         if (
@@ -167,28 +199,58 @@ class BackEnd(mp.Process):
                 frame_idx, viewpoint, dust3r_payload
             )
             if dust3r_payload is None:
-                self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+                self.try_add_next_kf(
+                    frame_idx, viewpoint, init=init, depth_map=depth_map
+                )
                 return False, 0
 
         try:
-            fused_point_cloud, features, scales, rots, opacities = (
-                self.gaussians.create_pcd_from_dust3r(
-                    dust3r_payload["pts3d"],
-                    dust3r_payload["imgs"],
-                    transform,
-                    scale=dust3r_payload.get("scale", 1.0),
-                    mask=dust3r_payload.get("masks"),
-                    init=init,
-                    pointmap_indices=dust3r_payload.get("pointmap_indices", [0]),
-                    alignment_transform=dust3r_payload.get("alignment_transform"),
+            if (
+                init
+                and self.dust3r_init_backproject
+                and dust3r_payload.get("depthmaps") is not None
+            ):
+                pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
+                pointmap_index = pointmap_indices[0]
+                pointmap_scale_divisors = dust3r_payload.get(
+                    "pointmap_scale_divisors", None
                 )
-            )
+                if pointmap_scale_divisors is not None:
+                    scale = pointmap_scale_divisors[pointmap_index]
+                else:
+                    scale = dust3r_payload.get("scale", 1.0)
+                fused_point_cloud, features, scales, rots, opacities = (
+                    self.gaussians.create_pcd_from_dust3r_depth(
+                        viewpoint,
+                        dust3r_payload["depthmaps"],
+                        scale=scale,
+                        mask=dust3r_payload.get("masks"),
+                        init=init,
+                        pointmap_index=pointmap_index,
+                    )
+                )
+            else:
+                fused_point_cloud, features, scales, rots, opacities = (
+                    self.gaussians.create_pcd_from_dust3r(
+                        dust3r_payload["pts3d"],
+                        dust3r_payload["imgs"],
+                        transform,
+                        scale=dust3r_payload.get("scale", 1.0),
+                        mask=dust3r_payload.get("masks"),
+                        init=init,
+                        pointmap_indices=dust3r_payload.get("pointmap_indices", [0]),
+                        alignment_transform=dust3r_payload.get("alignment_transform"),
+                    )
+                )
             inserted_points = fused_point_cloud.shape[0]
             self.gaussians.extend_from_pcd(
                 fused_point_cloud, features, scales, rots, opacities, frame_idx
             )
             use_fast_mapping = (
                 inserted_points >= self.dust3r_min_insert_points_for_fast_mapping
+            )
+            Log(
+                f"DUSt3R inserted {inserted_points} Gaussians for kf {frame_idx}"
             )
             if use_fast_mapping and self.dust3r_skip_densify_after_insert > 0:
                 self.skip_densify_events = max(
@@ -201,7 +263,7 @@ class BackEnd(mp.Process):
             return use_fast_mapping, inserted_points
         except Exception as exc:
             Log(f"DUSt3R Gaussian init failed, falling back to depth init: {exc}")
-            self.add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+            self.try_add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
 
     def estimate_similarity_transform(self, source, target):
@@ -502,7 +564,91 @@ class BackEnd(mp.Process):
         while not self.backend_queue.empty():
             self.backend_queue.get()
 
-    def initialize_map(self, cur_frame_idx, viewpoint):
+    def build_dust3r_depth_prior(self, viewpoint, dust3r_payload):
+        if (
+            dust3r_payload is None
+            or self.dust3r_init_depth_prior_weight <= 0
+            or dust3r_payload.get("depthmaps") is None
+        ):
+            return None, None
+
+        pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
+        pointmap_index = pointmap_indices[0]
+        depthmaps = dust3r_payload["depthmaps"]
+        depth = depthmaps[pointmap_index]
+        depth = depth.detach().cpu().numpy() if hasattr(depth, "detach") else np.asarray(depth)
+        depth_t = torch.from_numpy(depth.astype(np.float32))[None, None].to(self.device)
+        depth_t = F.interpolate(
+            depth_t,
+            size=(viewpoint.image_height, viewpoint.image_width),
+            mode="bilinear",
+            align_corners=False,
+        )[0]
+
+        pointmap_scale_divisors = dust3r_payload.get("pointmap_scale_divisors", None)
+        if pointmap_scale_divisors is not None:
+            scale = pointmap_scale_divisors[pointmap_index]
+        else:
+            scale = dust3r_payload.get("scale", 1.0)
+        scale = float(scale)
+        if not np.isfinite(scale) or abs(scale) < 1e-8:
+            scale = 1.0
+        depth_t = depth_t / scale
+
+        dust3r_config = self.config["Training"].get("dust3r", {})
+        dust3r_init_config = dust3r_config.get("init", {})
+        depth_min = float(dust3r_config.get("depth_min", 0.05))
+        depth_max = float(dust3r_config.get("depth_max", 20.0))
+        prior_mask = torch.isfinite(depth_t)
+        prior_mask = torch.logical_and(prior_mask, depth_t > depth_min)
+        prior_mask = torch.logical_and(prior_mask, depth_t < depth_max)
+        if (
+            bool(dust3r_init_config.get("use_confidence_mask", True))
+            and dust3r_payload.get("masks") is not None
+            and dust3r_payload["masks"][pointmap_index] is not None
+        ):
+            mask_np = np.asarray(dust3r_payload["masks"][pointmap_index]).astype(np.float32)
+            mask_t = torch.from_numpy(mask_np)[None, None].to(self.device)
+            mask_t = F.interpolate(
+                mask_t,
+                size=(viewpoint.image_height, viewpoint.image_width),
+                mode="nearest",
+            )[0].bool()
+            prior_mask = torch.logical_and(prior_mask, mask_t)
+
+        if prior_mask.count_nonzero() == 0:
+            return None, None
+        return depth_t, prior_mask
+
+    def get_dust3r_depth_prior_loss(self, depth, opacity, prior_depth, prior_mask):
+        if prior_depth is None or prior_mask is None:
+            return depth.sum() * 0.0
+        mask = prior_mask
+        if opacity is not None:
+            mask = torch.logical_and(
+                mask, opacity.detach() > self.dust3r_init_depth_prior_opacity_threshold
+            )
+        if mask.count_nonzero() == 0:
+            return depth.sum() * 0.0
+
+        pred = depth[mask]
+        target = prior_depth[mask]
+        ratio = pred / torch.clamp(target, min=1e-6)
+        log_err = torch.log(torch.clamp(ratio, min=1e-6, max=1e6))
+        return torch.nn.functional.smooth_l1_loss(
+            log_err, torch.zeros_like(log_err), beta=0.1
+        )
+
+    def initialize_map(self, cur_frame_idx, viewpoint, dust3r_payload=None):
+        prior_depth, prior_mask = self.build_dust3r_depth_prior(
+            viewpoint, dust3r_payload
+        )
+        if prior_depth is not None:
+            Log(
+                f"Using DUSt3R depth prior for init: "
+                f"{int(prior_mask.count_nonzero())}/{prior_mask.numel()} pixels, "
+                f"weight {self.dust3r_init_depth_prior_weight}"
+            )
         for mapping_iteration in range(self.init_itr_num):
             self.iteration_count += 1
             render_pkg = render(
@@ -528,6 +674,12 @@ class BackEnd(mp.Process):
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
             )
+            if prior_depth is not None:
+                loss_init = loss_init + self.dust3r_init_depth_prior_weight * (
+                    self.get_dust3r_depth_prior_loss(
+                        depth, opacity, prior_depth, prior_mask
+                    )
+                )
             loss_init.backward()
 
             with torch.no_grad():
@@ -854,14 +1006,25 @@ class BackEnd(mp.Process):
                     self.reset()
 
                     self.viewpoints[cur_frame_idx] = viewpoint
-                    self.add_next_kf_from_dust3r(
+                    used_dust3r, inserted_points = self.add_next_kf_from_dust3r(
                         cur_frame_idx,
                         viewpoint,
                         dust3r_payload,
                         depth_map=depth_map,
                         init=True,
                     )
-                    self.initialize_map(cur_frame_idx, viewpoint)
+                    self.initialize_map(cur_frame_idx, viewpoint, dust3r_payload)
+                    if (
+                        dust3r_payload is not None
+                        and dust3r_payload.get("init", False)
+                        and not dust3r_payload.get("regularization_only", False)
+                        and inserted_points > 0
+                    ):
+                        self.initialized = True
+                        Log(
+                            f"Initialized SLAM from DUSt3R pair "
+                            f"({inserted_points} Gaussians)"
+                        )
                     self.push_to_frontend("init")
 
                 elif data[0] == "keyframe":

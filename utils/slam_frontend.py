@@ -58,6 +58,15 @@ class FrontEnd(mp.Process):
         self.last_dust3r_kf_count = -1
         self.dust3r_calls = 0
         self.dust3r_time = 0.0
+        self.dust3r_init_enabled = False
+        self.dust3r_init_anchor_idx = None
+        self.dust3r_init_max_search_frames = 10
+        self.dust3r_init_min_baseline = 0.5
+        self.dust3r_init_max_baseline = 20.0
+        self.dust3r_init_fallback_to_depth = True
+        self.dust3r_init_only = False
+        self.dust3r_init_prior_only = False
+        self.dust3r_initialized_from_pair = False
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -67,8 +76,12 @@ class FrontEnd(mp.Process):
 
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
         self.kf_interval = self.config["Training"]["kf_interval"]
+        self.kf_min_interval = int(self.config["Training"].get("kf_min_interval", 0))
         self.window_size = self.config["Training"]["window_size"]
         self.single_thread = self.config["Training"]["single_thread"]
+        self.max_frames = self.config["Results"].get("max_frames", None)
+        tracking_config = self.config.get("Tracking", {})
+        self.pose_init_mode = tracking_config.get("pose_init", "previous_pose")
         self.dust3r_config = self.config["Training"].get("dust3r", {})
         self.use_dust3r = bool(self.dust3r_config.get("enabled", False))
         self.dust3r_device = self.dust3r_config.get("device", self.device)
@@ -89,6 +102,22 @@ class FrontEnd(mp.Process):
         self.dust3r_min_keyframe_gap = int(
             dust3r_optimization.get("min_keyframe_gap", 0)
         )
+        dust3r_init = self.dust3r_config.get("init", {})
+        self.dust3r_init_enabled = bool(dust3r_init.get("enabled", False))
+        self.dust3r_init_max_search_frames = int(
+            dust3r_init.get("max_search_frames", 10)
+        )
+        self.dust3r_init_min_baseline = float(
+            dust3r_init.get("min_baseline", self.dust3r_min_baseline)
+        )
+        self.dust3r_init_max_baseline = float(
+            dust3r_init.get("max_baseline", self.dust3r_max_baseline)
+        )
+        self.dust3r_init_fallback_to_depth = bool(
+            dust3r_init.get("fallback_to_depth", True)
+        )
+        self.dust3r_init_only = bool(dust3r_init.get("only", False))
+        self.dust3r_init_prior_only = bool(dust3r_init.get("prior_only", False))
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -161,6 +190,100 @@ class FrontEnd(mp.Process):
         self.request_init(cur_frame_idx, viewpoint, depth_map)
         self.reset = False
 
+    def clear_frontend_map_state(self, clear_dust3r_anchor=True):
+        self.initialized = not self.monocular
+        self.kf_indices = []
+        self.iteration_count = 0
+        self.occ_aware_visibility = {}
+        self.current_window = []
+        if clear_dust3r_anchor:
+            self.dust3r_init_anchor_idx = None
+            self.dust3r_initialized_from_pair = False
+
+    def should_use_dust3r_initialization(self):
+        return (
+            self.monocular
+            and self.use_dust3r
+            and self.dust3r_model is not None
+            and self.dust3r_init_enabled
+        )
+
+    def start_dust3r_initialization(self, cur_frame_idx, viewpoint):
+        self.clear_frontend_map_state(clear_dust3r_anchor=False)
+        while not self.backend_queue.empty():
+            self.backend_queue.get()
+
+        viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
+        self.dust3r_init_anchor_idx = cur_frame_idx
+        self.dust3r_initialized_from_pair = False
+        self.reset = True
+        Log(
+            f"Staged frame {cur_frame_idx} as DUSt3R initialization anchor"
+        )
+
+    def try_dust3r_initialization(self, cur_frame_idx, viewpoint):
+        anchor_idx = self.dust3r_init_anchor_idx
+        if anchor_idx is None or anchor_idx not in self.cameras:
+            self.start_dust3r_initialization(cur_frame_idx, viewpoint)
+            return False
+
+        viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
+        baseline = torch.norm(
+            self.get_camera_center(cur_frame_idx) - self.get_camera_center(anchor_idx)
+        ).item()
+        searched_frames = cur_frame_idx - anchor_idx
+        baseline_ready = baseline >= self.dust3r_init_min_baseline and (
+            self.dust3r_init_max_baseline <= 0
+            or baseline <= self.dust3r_init_max_baseline
+        )
+        search_exhausted = searched_frames >= self.dust3r_init_max_search_frames
+
+        if not baseline_ready and not search_exhausted:
+            Log(
+                f"Waiting for DUSt3R init baseline: frame {cur_frame_idx}, "
+                f"baseline {baseline:.4f}m < {self.dust3r_init_min_baseline:.4f}m"
+            )
+            return False
+
+        dust3r_payload = None
+        if baseline_ready:
+            dust3r_payload = self.prepare_keyframe_dust3r(
+                cur_frame_idx, anchor_idx, init=True
+            )
+
+        if dust3r_payload is not None:
+            if self.dust3r_init_prior_only:
+                dust3r_payload = dict(dust3r_payload)
+                dust3r_payload["regularization_only"] = True
+                depth_map = self.add_new_keyframe(cur_frame_idx, init=True)
+            else:
+                self.kf_indices = [cur_frame_idx]
+                depth_map = None
+                self.initialized = True
+            self.dust3r_initialized_from_pair = True
+            self.request_init(cur_frame_idx, viewpoint, depth_map, dust3r_payload)
+            self.reset = False
+            Log(
+                f"Initialized map request with DUSt3R "
+                f"{'prior' if self.dust3r_init_prior_only else 'pair'} "
+                f"{cur_frame_idx}<->{anchor_idx} (baseline {baseline:.4f}m)"
+            )
+            return True
+
+        if not self.dust3r_init_fallback_to_depth:
+            Log(
+                f"DUSt3R initialization failed at frame {cur_frame_idx}; "
+                "waiting because fallback_to_depth=False"
+            )
+            return False
+
+        Log(
+            f"DUSt3R initialization unavailable at frame {cur_frame_idx}; "
+            "falling back to monocular depth initialization"
+        )
+        self.initialize(cur_frame_idx, viewpoint)
+        return True
+
     def run_dust3r_pair(self, img1, img2, tag):
         if not self.use_dust3r or self.dust3r_model is None:
             return None
@@ -192,6 +315,8 @@ class FrontEnd(mp.Process):
         return c2w[:3, 3]
 
     def select_dust3r_reference_keyframe(self, cur_frame_idx):
+        if self.dust3r_init_only and self.dust3r_initialized_from_pair:
+            return None
         if self.dust3r_require_initialized and not self.initialized:
             return None
         if self.dust3r_min_keyframe_gap > 0 and self.last_dust3r_kf_count >= 0:
@@ -250,9 +375,111 @@ class FrontEnd(mp.Process):
             return 1.0
 
         scale_divisor = dust3r_dist / map_dist
-        return float(
+        clipped_scale_divisor = float(
             np.clip(scale_divisor, self.dust3r_scale_min, self.dust3r_scale_max)
         )
+        if abs(clipped_scale_divisor - scale_divisor) > 1e-6:
+            Log(
+                f"Clipped DUSt3R scale divisor from {scale_divisor:.6f} "
+                f"to {clipped_scale_divisor:.6f}"
+            )
+        return clipped_scale_divisor
+
+    def estimate_dust3r_pointmap_scale_divisors(
+        self,
+        poses,
+        matches_3d0,
+        matches_3d1,
+        cur_frame_idx,
+        ref_frame_idx,
+        fallback_scale_divisor,
+    ):
+        if matches_3d0 is None or matches_3d1 is None:
+            return [fallback_scale_divisor, fallback_scale_divisor]
+        if len(matches_3d0) < 32 or len(matches_3d1) < 32:
+            return [fallback_scale_divisor, fallback_scale_divisor]
+
+        pose0 = np.asarray(poses[0], dtype=np.float64)
+        pose1 = np.asarray(poses[1], dtype=np.float64)
+        pts0 = np.asarray(matches_3d0, dtype=np.float64)
+        pts1 = np.asarray(matches_3d1, dtype=np.float64)
+        finite = np.isfinite(pts0).all(axis=1) & np.isfinite(pts1).all(axis=1)
+        if finite.sum() < 32:
+            return [fallback_scale_divisor, fallback_scale_divisor]
+        pts0 = pts0[finite]
+        pts1 = pts1[finite]
+
+        max_matches = 4096
+        if pts0.shape[0] > max_matches:
+            rng = np.random.default_rng(0)
+            sample = rng.choice(pts0.shape[0], size=max_matches, replace=False)
+            pts0 = pts0[sample]
+            pts1 = pts1[sample]
+
+        local0 = (pts0 - pose0[:3, 3]) @ pose0[:3, :3]
+        local1 = (pts1 - pose1[:3, 3]) @ pose1[:3, :3]
+        valid_depth = (local0[:, 2] > 1e-6) & (local1[:, 2] > 1e-6)
+        if valid_depth.sum() < 32:
+            return [fallback_scale_divisor, fallback_scale_divisor]
+        local0 = local0[valid_depth]
+        local1 = local1[valid_depth]
+
+        c2w0 = torch.linalg.inv(
+            getWorld2View2(self.cameras[cur_frame_idx].R, self.cameras[cur_frame_idx].T)
+        ).detach().cpu().numpy()
+        c2w1 = torch.linalg.inv(
+            getWorld2View2(self.cameras[ref_frame_idx].R, self.cameras[ref_frame_idx].T)
+        ).detach().cpu().numpy()
+        vec0 = local0 @ c2w0[:3, :3].T
+        vec1 = local1 @ c2w1[:3, :3].T
+        baseline = c2w1[:3, 3] - c2w0[:3, 3]
+
+        def solve_scales(mask):
+            a = np.stack((vec0[mask], -vec1[mask]), axis=2).reshape(-1, 2)
+            b = np.repeat(baseline[None, :], int(mask.sum()), axis=0).reshape(-1)
+            try:
+                scales, *_ = np.linalg.lstsq(a, b, rcond=None)
+            except np.linalg.LinAlgError:
+                return None
+            return scales
+
+        mask = np.ones(vec0.shape[0], dtype=bool)
+        metric_scales = solve_scales(mask)
+        if metric_scales is None:
+            return [fallback_scale_divisor, fallback_scale_divisor]
+        for _ in range(2):
+            residual = np.linalg.norm(
+                metric_scales[0] * vec0 - metric_scales[1] * vec1 - baseline,
+                axis=1,
+            )
+            median = np.median(residual)
+            mad = np.median(np.abs(residual - median)) + 1e-8
+            mask = residual < median + 3.0 * 1.4826 * mad
+            if mask.sum() < 32:
+                break
+            refined = solve_scales(mask)
+            if refined is None:
+                break
+            metric_scales = refined
+
+        if (
+            not np.isfinite(metric_scales).all()
+            or metric_scales[0] <= 1e-8
+            or metric_scales[1] <= 1e-8
+        ):
+            return [fallback_scale_divisor, fallback_scale_divisor]
+
+        scale_divisors = 1.0 / metric_scales
+        scale_divisors = np.clip(
+            scale_divisors, self.dust3r_scale_min, self.dust3r_scale_max
+        )
+        pointmap_ratio = scale_divisors[1] / max(scale_divisors[0], 1e-8)
+        Log(
+            "DUSt3R pointmap scale divisors: "
+            f"cur={scale_divisors[0]:.6f}, ref={scale_divisors[1]:.6f}, "
+            f"ref/cur={pointmap_ratio:.4f}, matches={int(mask.sum())}"
+        )
+        return [float(scale_divisors[0]), float(scale_divisors[1])]
 
     def prepare_keyframe_dust3r(self, cur_frame_idx, ref_frame_idx, init=False):
         if not self.use_dust3r or self.dust3r_model is None:
@@ -270,6 +497,9 @@ class FrontEnd(mp.Process):
                 _matches_im0,
                 _matches_im1,
                 _matches_3d0,
+                _matches_3d1,
+                poses,
+                depthmaps,
             ) = self.run_dust3r_pair(
                 viewpoint.original_image,
                 ref_viewpoint.original_image,
@@ -282,27 +512,51 @@ class FrontEnd(mp.Process):
         scale_divisor = self.estimate_dust3r_scale(
             trans_pose, cur_frame_idx, ref_frame_idx
         )
+        pointmap_scale_divisors = self.estimate_dust3r_pointmap_scale_divisors(
+            poses,
+            _matches_3d0,
+            _matches_3d1,
+            cur_frame_idx,
+            ref_frame_idx,
+            scale_divisor,
+        )
+        scale_divisor = pointmap_scale_divisors[0]
         world_frame_idx = cur_frame_idx if reference_idx == 0 else ref_frame_idx
         Log(
             f"DUSt3R keyframe payload: kf {cur_frame_idx}, ref {ref_frame_idx}, "
             f"world {world_frame_idx}, scale divisor {scale_divisor:.4f}"
         )
         self.last_dust3r_kf_count = len(self.kf_indices)
+        world_viewpoint = self.cameras[world_frame_idx]
         return {
             "pts3d": pts3d,
             "imgs": imgs,
             "masks": masks,
+            "poses": poses,
+            "depthmaps": depthmaps,
             "scale": scale_divisor,
+            "pointmap_scale_divisors": pointmap_scale_divisors,
             "reference_idx": reference_idx,
             "reference_frame_idx": ref_frame_idx,
             "world_frame_idx": world_frame_idx,
+            "world_R": world_viewpoint.R.detach().clone(),
+            "world_T": world_viewpoint.T.detach().clone(),
             "pointmap_indices": [0],
             "init": init,
         }
 
     def tracking(self, cur_frame_idx, viewpoint):
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
-        viewpoint.update_RT(prev.R, prev.T)
+        if self.pose_init_mode == "constant_velocity" and (
+            cur_frame_idx - 2 * self.use_every_n_frames
+        ) in self.cameras:
+            prev2 = self.cameras[cur_frame_idx - 2 * self.use_every_n_frames]
+            w2c_prev = getWorld2View2(prev.R, prev.T)
+            w2c_prev2 = getWorld2View2(prev2.R, prev2.T)
+            w2c_pred = w2c_prev @ torch.linalg.inv(w2c_prev2) @ w2c_prev
+            viewpoint.update_RT(w2c_pred[:3, :3], w2c_pred[:3, 3])
+        else:
+            viewpoint.update_RT(prev.R, prev.T)
 
         opt_params = []
         opt_params.append(
@@ -410,6 +664,9 @@ class FrontEnd(mp.Process):
         removed_frame = None
         for i in range(N_dont_touch, len(window)):
             kf_idx = window[i]
+            if kf_idx not in occ_aware_visibility:
+                to_remove.append(kf_idx)
+                continue
             # szymkiewicz–simpson coefficient
             intersection = torch.logical_and(
                 cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
@@ -418,6 +675,9 @@ class FrontEnd(mp.Process):
                 cur_frame_visibility_filter.count_nonzero(),
                 occ_aware_visibility[kf_idx].count_nonzero(),
             )
+            if denom == 0:
+                to_remove.append(kf_idx)
+                continue
             point_ratio_2 = intersection / denom
             cut_off = (
                 self.config["Training"]["kf_cutoff"]
@@ -528,7 +788,9 @@ class FrontEnd(mp.Process):
 
             if self.frontend_queue.empty():
                 tic.record()
-                if cur_frame_idx >= len(self.dataset):
+                if cur_frame_idx >= len(self.dataset) or (
+                    self.max_frames is not None and cur_frame_idx >= self.max_frames
+                ):
                     if self.save_results:
                         eval_ate(
                             self.cameras,
@@ -563,8 +825,15 @@ class FrontEnd(mp.Process):
                 self.cameras[cur_frame_idx] = viewpoint
 
                 if self.reset:
-                    self.initialize(cur_frame_idx, viewpoint)
-                    self.current_window.append(cur_frame_idx)
+                    if self.should_use_dust3r_initialization():
+                        initialized = self.try_dust3r_initialization(
+                            cur_frame_idx, viewpoint
+                        )
+                        if initialized:
+                            self.current_window.append(cur_frame_idx)
+                    else:
+                        self.initialize(cur_frame_idx, viewpoint)
+                        self.current_window.append(cur_frame_idx)
                     cur_frame_idx += 1
                     continue
 
@@ -616,6 +885,11 @@ class FrontEnd(mp.Process):
                     )
                 if self.single_thread:
                     create_kf = check_time and create_kf
+                if self.kf_min_interval > 0:
+                    create_kf = (
+                        create_kf
+                        and (cur_frame_idx - last_keyframe_idx) >= self.kf_min_interval
+                    )
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
@@ -624,6 +898,7 @@ class FrontEnd(mp.Process):
                         self.current_window,
                     )
                     if self.monocular and not self.initialized and removed is not None:
+                        self.clear_frontend_map_state(clear_dust3r_anchor=True)
                         self.reset = True
                         Log(
                             "Keyframes lacks sufficient overlap to initialize the map, resetting."

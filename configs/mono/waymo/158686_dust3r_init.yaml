@@ -1,0 +1,15 @@
+inherit_from: "configs/mono/waymo/158686.yaml"
+
+Training:
+  dust3r:
+    enabled: True
+    require_initialized: True
+    init:
+      enabled: True
+      max_search_frames: 10
+      min_baseline: 0.50
+      max_baseline: 20.0
+      fallback_to_depth: True
+      only: True
+      prior_only: True
+      backproject_depth: True

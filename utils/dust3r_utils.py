@@ -126,6 +126,8 @@ def get_result(
     poses_np = [pose.detach().cpu().numpy() for pose in poses]
     pts3d = scene.get_pts3d()
     pts3d_np = [pts.detach().cpu().numpy() for pts in pts3d]
+    depthmaps = scene.get_depthmaps()
+    depthmaps_np = [depth.detach().cpu().numpy() for depth in depthmaps]
     confidence_masks = scene.get_masks()
     masks_np = [mask.detach().cpu().numpy().astype(bool) for mask in confidence_masks]
     imgs = scene.imgs
@@ -151,6 +153,7 @@ def get_result(
     matches_im1 = pts2d_list[1][reciprocal_in_P2]
     matches_im0 = pts2d_list[0][nn2_in_P1][reciprocal_in_P2]
     matches_3d0 = pts3d_list[0][nn2_in_P1][reciprocal_in_P2]
+    matches_3d1 = pts3d_list[1][reciprocal_in_P2]
 
     return (
         trans_pose,
@@ -161,6 +164,9 @@ def get_result(
         matches_im0,
         matches_im1,
         matches_3d0,
+        matches_3d1,
+        poses_np,
+        depthmaps_np,
     )
 
 # Obtain the scale factor based on point matching correspondence and point cloud coordinates    

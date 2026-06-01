@@ -1,0 +1,25 @@
+inherit_from: "configs/mono/waymo/106762.yaml"
+
+Training:
+  dust3r:
+    enabled: True
+    require_initialized: True
+    init:
+      enabled: True
+      max_search_frames: 10
+      min_baseline: 0.50
+      max_baseline: 20.0
+      fallback_to_depth: True
+      only: True
+      prior_only: False
+      backproject_depth: True
+      sample_stride: 2
+      gradient_extra_samples: True
+      gradient_threshold: 0.08
+      gradient_stride: 2
+      max_points: 200000
+      use_pixel_footprint_scale: True
+      pixel_footprint_scale: 0.75
+      use_confidence_mask: True
+      fill_invalid_depth: False
+      point_size_scale: 0.25

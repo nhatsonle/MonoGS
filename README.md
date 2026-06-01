@@ -57,6 +57,17 @@ Setup the environment.
 > Install `numpy==1.24.4` **first** — several C-extensions (OpenCV, quaternion) are compiled against NumPy 1.x ABI and will crash at runtime with NumPy 2.x.
 
 ```bash
+apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libegl1-mesa \
+    libgles2-mesa \
+    libosmesa6-dev \
+    freeglut3-dev \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+```bash
 # Step 1: pin NumPy before anything else
 pip install numpy==1.24.4
 
