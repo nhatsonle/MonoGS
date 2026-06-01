@@ -50,34 +50,42 @@ The method demonstrates the first monocular SLAM solely based on 3D Gaussian Spl
 git clone https://github.com/muskie82/MonoGS.git --recursive
 cd MonoGS
 ```
+
 Setup the environment.
 
-```
+> **Tested with Python 3.10, CUDA 11.x/12.x.**
+> Install `numpy==1.24.4` **first** — several C-extensions (OpenCV, quaternion) are compiled against NumPy 1.x ABI and will crash at runtime with NumPy 2.x.
+
+```bash
+# Step 1: pin NumPy before anything else
+pip install numpy==1.24.4
+
+# Step 2: core dependencies
 pip install \
-plyfile==0.8.1 \
-tqdm \
-opencv-python==4.8.1.78 \
-munch \
-trimesh \
-evo==1.11.0 \
-open3d==0.17.0 \
-torchmetrics \
-imgviz \
-PyOpenGL \
-glfw \
-PyGLM \
-wandb \
-lpips \
-rich \
-ruff
+    scipy matplotlib pandas networkx tqdm pyyaml \
+    opencv-python==4.8.1.78 \
+    pycolmap einops evo plyfile \
+    open3d trimesh roma \
+    numpy-quaternion==2023.0.2 \
+    lpips tensorboard wandb \
+    pyopengl pyrender \
+    huggingface-hub cvxpy munch glfw imgviz \
+    pyglm==2.7.1 \
+    torchmetrics==1.4.0.post0 \
+    gdown rich ruff
+
+# Step 3: fix blinker conflict then reinstall open3d
 pip install open3d --ignore-installed blinker
+
+# Step 4: submodules
 pip install submodules/simple-knn
 pip install submodules/diff-gaussian-rasterization
-
 ```
+
+> **Note:** `numpy-quaternion>=2024` requires `numpy>=1.25` and is incompatible with this stack — use `2023.0.2` as above.
 
 Compile the cuda kernels for RoPE (as in CroCo v2 and DUSt3R).
-```
+```bash
 cd croco/models/curope/
 python setup.py build_ext --inplace
 cd ../../../
