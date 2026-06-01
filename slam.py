@@ -102,6 +102,12 @@ class SLAM:
             q_vis2main=q_vis2main,
         )
 
+        def log_final_gaussian_count(gaussians):
+            if gaussians is None:
+                Log("Final Gaussian count unavailable", tag="Eval")
+                return
+            Log("Final Gaussian count", gaussians.get_xyz.shape[0], tag="Eval")
+
         backend_process = mp.Process(target=self.backend.run)
         if self.use_gui:
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
@@ -192,6 +198,9 @@ class SLAM:
                 )
             wandb.log({"Metrics": metrics_table})
             save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
+
+        final_gaussians = self.gaussians if self.eval_rendering else self.frontend.gaussians
+        log_final_gaussian_count(final_gaussians)
 
         backend_queue.put(["stop"])
         backend_process.join()

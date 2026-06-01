@@ -139,7 +139,93 @@ Relevant files:
 - `utils/slam_backend.py`
 - `gaussian_splatting/scene/gaussian_model.py`
 
-## 6. Safer DUSt3R Scheduling
+## 6. DUSt3R Pair-Based Map Initialization
+
+DUSt3R can optionally be used before the normal monocular map initialization.
+This mode stages one frame as an anchor, waits until a later frame satisfies the
+configured baseline/search policy, and then initializes the map from the
+DUSt3R pair result.
+
+Config:
+
+```yaml
+Training:
+  dust3r:
+    enabled: True
+    init:
+      enabled: True
+      max_search_frames: 10
+      min_baseline: 0.50
+      max_baseline: 20.0
+      fallback_to_depth: True
+      only: False
+      prior_only: False
+      depth_prior_weight: 0.05
+      depth_prior_opacity_threshold: 0.2
+      backproject_depth: True
+      pcd_downsample: 4
+      point_size_scale: 0.25
+      sample_stride: 2
+      gradient_extra_samples: True
+      gradient_threshold: 0.08
+      gradient_stride: 2
+      max_points: 200000
+      use_pixel_footprint_scale: True
+      pixel_footprint_scale: 0.75
+      use_confidence_mask: True
+      fill_invalid_depth: True
+      invalid_depth: 2.0
+      invalid_depth_noise: 0.05
+```
+
+Initialization policy:
+
+- The first suitable frame is staged as `dust3r_init_anchor_idx`.
+- Later frames are tested against `min_baseline`, `max_baseline`, and
+  `max_search_frames`.
+- If DUSt3R succeeds, the backend receives an initialization payload with
+  pointmaps, depth maps, masks, pose metadata, and scale divisors.
+- If `prior_only=True`, DUSt3R is used as a depth regularization prior while the
+  system still creates the initial Gaussians from the usual depth path.
+- If `fallback_to_depth=True`, the system falls back to standard monocular depth
+  initialization when DUSt3R initialization is unavailable.
+- If `fallback_to_depth=False`, initialization waits instead of silently falling
+  back.
+- If `only=True`, DUSt3R is used only for the initialization pair and skipped
+  for later keyframes after the pair initialization has succeeded.
+
+Backprojection mode:
+
+When `backproject_depth=True`, the backend initializes Gaussians by resizing the
+DUSt3R depth map to the camera resolution and backprojecting it through the
+current camera intrinsics/pose. This mode can:
+
+- filter by DUSt3R confidence masks;
+- fill invalid DUSt3R depths with a configurable fallback depth/noise;
+- sample a regular grid using `sample_stride`;
+- add extra samples on high-image-gradient pixels;
+- cap the number of initialized points with `max_points`;
+- initialize Gaussian scale from pixel footprint instead of nearest-neighbor
+  distance.
+
+Impact:
+
+- Enables monocular map initialization from a non-degenerate DUSt3R image pair
+  instead of only using the synthetic/random initial monocular depth.
+- Provides a controlled fallback path for cases where DUSt3R fails or the
+  baseline is not ready.
+- Gives Waymo/KITTI-style outdoor sequences a denser, configurable initialization
+  path based on DUSt3R depth backprojection.
+
+Relevant files:
+
+- `utils/slam_frontend.py`
+- `utils/slam_backend.py`
+- `gaussian_splatting/scene/gaussian_model.py`
+- `configs/mono/waymo/base_config.yaml`
+- `configs/mono/waymo/*_dust3r_init.yaml`
+
+## 7. Safer DUSt3R Scheduling
 
 The first implementation inserted DUSt3R pointmaps too aggressively and degraded
 render quality. The current policy is more conservative.
@@ -162,18 +248,35 @@ max_baseline: 1.50
 
 - If no reference keyframe satisfies the baseline range, DUSt3R is skipped for
   that keyframe.
+- DUSt3R pointmaps can be rescaled from the ratio between DUSt3R pair
+  translation and the current MonoGS keyframe baseline:
+
+```yaml
+scale:
+  baseline_ratio: True
+  pointmap_sync: True
+scale_min: 0.05
+scale_max: 20.0
+```
+
+`baseline_ratio` can be ablated independently from `pointmap_sync`. With
+`pointmap_sync: False`, the system uses the baseline-ratio divisor directly for
+all pointmaps in the pair. With both flags disabled, DUSt3R pointmaps are
+inserted without this metric scale normalization.
 
 Impact:
 
 - Avoids degenerate `DUSt3R(img, img)` initialization.
 - Avoids very small-baseline pairs where DUSt3R scale is unstable.
 - Reduces risk of corrupting the early monocular map.
+- Makes DUSt3R pointmap scale more consistent with the current MonoGS map scale
+  before Gaussian insertion.
 
 Relevant file:
 
 - `utils/slam_frontend.py`
 
-## 7. DUSt3R Pointmap Filtering
+## 8. DUSt3R Pointmap Filtering
 
 Before converting DUSt3R pointmaps into Gaussians, points are filtered by:
 
@@ -206,7 +309,7 @@ Relevant file:
 
 - `gaussian_splatting/scene/gaussian_model.py`
 
-## 8. DUSt3R-to-MonoGS Sim3 Alignment Gate
+## 9. DUSt3R-to-MonoGS Sim3 Alignment Gate
 
 The backend can now align DUSt3R pointmaps to the current MonoGS map before
 inserting Gaussians.
@@ -260,7 +363,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `gaussian_splatting/scene/gaussian_model.py`
 
-## 9. Coverage/Residual-Guided DUSt3R Insertion
+## 10. Coverage/Residual-Guided DUSt3R Insertion
 
 The backend can optionally render the current Gaussian map from the new keyframe
 pose before inserting DUSt3R points.
@@ -294,7 +397,7 @@ Relevant file:
 
 - `utils/slam_backend.py`
 
-## 10. DUSt3R-Aware Optimization Scheduler
+## 11. DUSt3R-Aware Optimization Scheduler
 
 The backend can now use a successful DUSt3R insertion as a signal to reduce
 optimization work for that keyframe.
@@ -339,7 +442,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `configs/mono/tum/ablations/fr3_office_07_dust3r_adaptive_optimization.yaml`
 
-## 11. Online Gaussian Lifecycle Controller
+## 12. Online Gaussian Lifecycle Controller
 
 The system now includes an optional online lifecycle controller for Gaussians.
 It manages each Gaussian as one of four states:
@@ -410,7 +513,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `configs/mono/tum/fr3_office.yaml`
 
-## 12. Ablation Configs
+## 13. Ablation Configs
 
 Dedicated ablation configs were added under:
 
@@ -445,6 +548,13 @@ fr3_office_06_dust3r_baseline_gated_lifecycle.yaml
 fr3_office_07_dust3r_adaptive_optimization.yaml
   DUSt3R baseline-gated config plus Sim3 alignment gate, adaptive mapping
   iterations, keyframe-gap throttling, and post-insertion densify skipping.
+
+fr3_office_08_dust3r_reduced_mapping_no_scale.yaml
+  Same as 02 but disables both baseline-ratio scaling and pointmap scale sync.
+
+fr3_office_09_dust3r_reduced_mapping_baseline_ratio_scale.yaml
+  Same as 08 but enables baseline-ratio scaling while keeping pointmap scale
+  sync disabled, isolating the baseline-ratio scale contribution.
 ```
 
 A helper script runs all ablations and stores logs:
@@ -458,7 +568,7 @@ Relevant files:
 - `configs/mono/tum/ablations/*.yaml`
 - `scripts/run_fr3_office_ablations.sh`
 
-## 13. Observed Behavior So Far
+## 14. Observed Behavior So Far
 
 From the available 200-frame `fr3_office` runs:
 
@@ -494,7 +604,7 @@ Interpretation:
 - The next configs to evaluate are `03` and `04`, which test insertion gating and
   stricter baseline gating.
 
-## 12. How To Run
+## 15. How To Run
 
 Default current `fr3_office` config:
 

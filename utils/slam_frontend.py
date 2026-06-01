@@ -49,6 +49,8 @@ class FrontEnd(mp.Process):
         self.dust3r_device = self.device
         self.dust3r_image_size = 512
         self.dust3r_batch_size = 1
+        self.dust3r_use_baseline_ratio_scale = True
+        self.dust3r_use_pointmap_scale_sync = True
         self.dust3r_scale_min = 0.05
         self.dust3r_scale_max = 20.0
         self.dust3r_min_baseline = 0.05
@@ -87,6 +89,13 @@ class FrontEnd(mp.Process):
         self.dust3r_device = self.dust3r_config.get("device", self.device)
         self.dust3r_image_size = int(self.dust3r_config.get("image_size", 512))
         self.dust3r_batch_size = int(self.dust3r_config.get("batch_size", 1))
+        dust3r_scale_config = self.dust3r_config.get("scale", {})
+        self.dust3r_use_baseline_ratio_scale = bool(
+            dust3r_scale_config.get("baseline_ratio", True)
+        )
+        self.dust3r_use_pointmap_scale_sync = bool(
+            dust3r_scale_config.get("pointmap_sync", True)
+        )
         self.dust3r_scale_min = float(self.dust3r_config.get("scale_min", 0.05))
         self.dust3r_scale_max = float(self.dust3r_config.get("scale_max", 20.0))
         self.dust3r_min_baseline = float(
@@ -358,6 +367,8 @@ class FrontEnd(mp.Process):
         return ref_idx
 
     def estimate_dust3r_scale(self, trans_pose, cur_frame_idx, ref_frame_idx):
+        if not self.dust3r_use_baseline_ratio_scale:
+            return 1.0
         if cur_frame_idx == ref_frame_idx:
             return 1.0
 
@@ -394,6 +405,8 @@ class FrontEnd(mp.Process):
         ref_frame_idx,
         fallback_scale_divisor,
     ):
+        if not self.dust3r_use_pointmap_scale_sync:
+            return [fallback_scale_divisor, fallback_scale_divisor]
         if matches_3d0 is None or matches_3d1 is None:
             return [fallback_scale_divisor, fallback_scale_divisor]
         if len(matches_3d0) < 32 or len(matches_3d1) < 32:

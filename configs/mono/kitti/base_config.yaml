@@ -55,6 +55,9 @@ Training:
     device: "cuda"
     image_size: 512
     batch_size: 1
+    scale:
+      baseline_ratio: True
+      pointmap_sync: True
     scale_min: 0.05
     scale_max: 20.0
     min_baseline: 0.50
