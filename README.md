@@ -70,9 +70,27 @@ wandb \
 lpips \
 rich \
 ruff
-
+pip install open3d --ignore-installed blinker
 pip install submodules/simple-knn
 pip install submodules/diff-gaussian-rasterization
+
+```
+
+Compile the cuda kernels for RoPE (as in CroCo v2 and DUSt3R).
+```
+cd croco/models/curope/
+python setup.py build_ext --inplace
+cd ../../../
+```
+
+Checkpoints
+You can download the 'DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth' checkpoint from the DUSt3R code repository, and save it to the 'checkpoints' folder.
+
+Alternatively, download it directly using the following method:
+
+```
+mkdir -p checkpoints/
+wget https://download.europe.naverlabs.com/ComputerVision/DUSt3R/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth -P checkpoints/
 ```
 Depending on your setup, please change the dependency version of pytorch/cudatoolkit in `environment.yml` by following [this document](https://pytorch.org/get-started/previous-versions/).
 
