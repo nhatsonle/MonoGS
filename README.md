@@ -54,7 +54,7 @@ cd MonoGS
 Setup the environment.
 
 > **Tested with Python 3.10, CUDA 11.x/12.x.**
-> Install `numpy==1.24.4` **first** — several C-extensions (OpenCV, quaternion) are compiled against NumPy 1.x ABI and will crash at runtime with NumPy 2.x.
+> Install `numpy==1.26.4` **first** — several C-extensions (OpenCV, quaternion) are compiled against NumPy 1.x ABI and will crash at runtime with NumPy 2.x.
 
 ```bash
 apt-get update && apt-get install -y \
@@ -69,11 +69,11 @@ apt-get update && apt-get install -y \
 
 ```bash
 # Step 1: pin NumPy before anything else
-pip install numpy==1.24.4
+pip install numpy==1.26.4
 
 # Step 2: core dependencies
 pip install \
-    scipy matplotlib pandas networkx tqdm pyyaml \
+    scipy matplotlib pandas networkx tqdm pyyaml ninja \
     opencv-python==4.8.1.78 \
     pycolmap einops evo plyfile \
     open3d trimesh roma \
