@@ -7,6 +7,9 @@ Training:
     min_baseline: 0.25
     max_baseline: 1.50
     depth_max: 20.0
+    scale:
+      baseline_ratio: True
+      pointmap_sync: True
     pointmap_insert:
       enabled: True
     selection:
@@ -28,15 +31,21 @@ Training:
       backproject_depth: True
       pcd_downsample: 4
       point_size_scale: 0.25
-      sample_stride: 2
-      gradient_extra_samples: True
+      sample_stride: 1
+      gradient_extra_samples: False
       gradient_threshold: 0.08
       gradient_stride: 2
       max_points: 200000
       use_pixel_footprint_scale: True
       pixel_footprint_scale: 0.75
-      use_confidence_mask: True
+      use_confidence_mask: False
       fill_invalid_depth: False
+      depth_scale:
+        enabled: True
+        mode: "median"
+        target_median: 2.0
+        min_scale: 0.25
+        max_scale: 4.0
       selection:
         candidate_pool: 1
         max_candidate_evals: 1
@@ -49,18 +58,31 @@ Training:
       enabled: True
       backproject_depth: True
       force_after_bootstrap: True
-      min_frame_gap: 30
-      min_keyframe_gap: 2
-      candidate_pool: 4
-      min_baseline: 0.05
-      max_baseline: 1.50
-      target_baseline: 0.25
-      min_opacity_coverage: 0.18
+      min_frame_gap: 50
+      min_keyframe_gap: 3
+      candidate_pool: 6
+      min_baseline: 0.08
+      max_baseline: 1.20
+      target_baseline: 0.30
+      min_opacity_coverage: 0.12
       opacity_threshold: 0.25
-      max_tracking_loss_ratio: 1.8
-      max_depth_change_ratio: 1.8
+      max_tracking_loss_ratio: 2.2
+      max_depth_change_ratio: 2.0
       min_visible_gaussian_ratio: 0.01
-      ema_decay: 0.90
-      max_calls: 0
+      ema_decay: 0.95
+      max_calls: 3
     optimization:
       min_keyframe_gap: 999999
+  lifecycle:
+    enabled: True
+    newborn_grace: 10
+    stable_min_visibility: 5
+    cold_min_age: 80
+    cold_grad_threshold: 0.00001
+    cold_opacity_threshold: 0.5
+    bad_opacity_threshold: 0.015
+    bad_min_visibility: 2
+    bad_patience: 8
+    freeze_cold: True
+    prune_bad: True
+    log_interval: 10

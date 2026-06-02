@@ -71,7 +71,7 @@ Training:
 
 Dataset:
   dataset_path: "datasets/tum/rgbd_dataset_freiburg3_long_office_household"
-  num_frames: 500
+  num_frames: -1
   Calibration:
     fx: 535.4
     fy: 539.2

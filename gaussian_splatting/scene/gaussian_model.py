@@ -30,6 +30,7 @@ from gaussian_splatting.utils.general_utils import (
 from gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian_splatting.utils.sh_utils import RGB2SH
 from gaussian_splatting.utils.system_utils import mkdir_p
+from utils.logging_utils import Log
 
 
 class GaussianModel:
@@ -550,6 +551,18 @@ class GaussianModel:
         pixel_footprint_scale = float(
             dust3r_init_config.get("pixel_footprint_scale", 0.75)
         )
+        depth_scale_config = dust3r_init_config.get("depth_scale", {})
+        normalize_init_depth_scale = bool(
+            depth_scale_config.get("enabled", False)
+        )
+        depth_scale_mode = depth_scale_config.get("mode", "median")
+        target_median_depth = float(depth_scale_config.get("target_median", 2.0))
+        target_percentile = float(depth_scale_config.get("target_percentile", 80.0))
+        target_percentile_depth = float(
+            depth_scale_config.get("target_percentile_depth", target_median_depth)
+        )
+        min_depth_scale = float(depth_scale_config.get("min_scale", 0.25))
+        max_depth_scale = float(depth_scale_config.get("max_scale", 4.0))
 
         scale = float(scale)
         if not np.isfinite(scale) or abs(scale) < 1e-8:
@@ -569,6 +582,36 @@ class GaussianModel:
         dust3r_valid = torch.isfinite(depth_t)
         dust3r_valid = torch.logical_and(dust3r_valid, depth_t > depth_min)
         dust3r_valid = torch.logical_and(dust3r_valid, depth_t < depth_max)
+        if init and normalize_init_depth_scale and dust3r_valid.count_nonzero() > 0:
+            valid_depths = depth_t[dust3r_valid]
+            if depth_scale_mode == "percentile":
+                source_depth = torch.quantile(
+                    valid_depths,
+                    torch.tensor(
+                        np.clip(target_percentile / 100.0, 0.0, 1.0),
+                        device=valid_depths.device,
+                        dtype=valid_depths.dtype,
+                    ),
+                )
+                target_depth = target_percentile_depth
+            else:
+                source_depth = torch.median(valid_depths)
+                target_depth = target_median_depth
+            source_depth_value = float(source_depth.detach().item())
+            if np.isfinite(source_depth_value) and source_depth_value > 1e-8:
+                depth_scale = source_depth_value / max(target_depth, 1e-8)
+                depth_scale = float(
+                    np.clip(depth_scale, min_depth_scale, max_depth_scale)
+                )
+                depth_t = depth_t / depth_scale
+                dust3r_valid = torch.isfinite(depth_t)
+                dust3r_valid = torch.logical_and(dust3r_valid, depth_t > depth_min)
+                dust3r_valid = torch.logical_and(dust3r_valid, depth_t < depth_max)
+                Log(
+                    "DUSt3R init depth scale normalization: "
+                    f"mode={depth_scale_mode}, source={source_depth_value:.4f}, "
+                    f"target={target_depth:.4f}, divisor={depth_scale:.4f}"
+                )
         if (
             use_confidence_mask
             and mask is not None
@@ -737,7 +780,7 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
-        l = [
+        param_groups = [
             {
                 "params": [self._xyz],
                 "lr": training_args.position_lr_init * self.spatial_lr_scale,
@@ -770,7 +813,7 @@ class GaussianModel:
             },
         ]
 
-        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.optimizer = torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init * self.spatial_lr_scale,
             lr_final=training_args.position_lr_final * self.spatial_lr_scale,
@@ -800,18 +843,18 @@ class GaussianModel:
                 return lr
 
     def construct_list_of_attributes(self):
-        l = ["x", "y", "z", "nx", "ny", "nz"]
+        attrs = ["x", "y", "z", "nx", "ny", "nz"]
         # All channels except the 3 DC
         for i in range(self._features_dc.shape[1] * self._features_dc.shape[2]):
-            l.append("f_dc_{}".format(i))
+            attrs.append("f_dc_{}".format(i))
         for i in range(self._features_rest.shape[1] * self._features_rest.shape[2]):
-            l.append("f_rest_{}".format(i))
-        l.append("opacity")
+            attrs.append("f_rest_{}".format(i))
+        attrs.append("opacity")
         for i in range(self._scaling.shape[1]):
-            l.append("scale_{}".format(i))
+            attrs.append("scale_{}".format(i))
         for i in range(self._rotation.shape[1]):
-            l.append("rot_{}".format(i))
-        return l
+            attrs.append("rot_{}".format(i))
+        return attrs
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
