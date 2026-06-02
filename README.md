@@ -72,10 +72,10 @@ apt-get update && apt-get install -y \
 pip install numpy==1.26.4
 
 # Step 2: core dependencies
-pip install \
+python -m pip install \
     scipy matplotlib pandas networkx tqdm pyyaml ninja \
     opencv-python==4.8.1.78 \
-    pycolmap einops evo plyfile \
+    pycolmap einops evo plyfile==0.8.1 \
     open3d trimesh roma \
     numpy-quaternion==2023.0.2 \
     lpips tensorboard wandb \
@@ -83,7 +83,8 @@ pip install \
     huggingface-hub cvxpy munch glfw imgviz \
     pyglm==2.7.1 \
     torchmetrics==1.4.0.post0 \
-    gdown rich ruff
+    gdown rich ruff \
+    "numpy==1.26.4"
 
 # Step 3: fix blinker conflict then reinstall open3d
 pip install open3d --ignore-installed blinker
