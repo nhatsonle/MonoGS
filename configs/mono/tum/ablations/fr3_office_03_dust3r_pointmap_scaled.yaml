@@ -1,0 +1,7 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_02_dust3r_pointmap_no_scale.yaml"
+
+Training:
+  dust3r:
+    scale:
+      baseline_ratio: True
+      pointmap_sync: True

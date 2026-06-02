@@ -1,0 +1,66 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_00_monogs.yaml"
+
+Training:
+  dust3r:
+    enabled: True
+    require_initialized: False
+    min_baseline: 0.25
+    max_baseline: 1.50
+    depth_max: 20.0
+    pointmap_insert:
+      enabled: True
+    selection:
+      enabled: True
+      candidate_pool: 4
+      max_candidate_evals: 1
+      target_baseline: 0.35
+      min_pair_conf: 3.0
+      min_valid_ratio: 0.08
+      min_matches: 512
+      min_score: 1.5
+      max_pointmap_scale_ratio: 1.75
+    init:
+      enabled: True
+      mode: "single_view"
+      fallback_to_depth: False
+      only: True
+      prior_only: False
+      backproject_depth: True
+      pcd_downsample: 4
+      point_size_scale: 0.25
+      sample_stride: 2
+      gradient_extra_samples: True
+      gradient_threshold: 0.08
+      gradient_stride: 2
+      max_points: 200000
+      use_pixel_footprint_scale: True
+      pixel_footprint_scale: 0.75
+      use_confidence_mask: True
+      fill_invalid_depth: False
+      selection:
+        candidate_pool: 1
+        max_candidate_evals: 1
+        min_pair_conf: 3.0
+        min_valid_ratio: 0.08
+        min_matches: 128
+        min_score: 0.5
+        max_pointmap_scale_ratio: 1.75
+    refresh:
+      enabled: True
+      backproject_depth: True
+      force_after_bootstrap: True
+      min_frame_gap: 30
+      min_keyframe_gap: 2
+      candidate_pool: 4
+      min_baseline: 0.05
+      max_baseline: 1.50
+      target_baseline: 0.25
+      min_opacity_coverage: 0.18
+      opacity_threshold: 0.25
+      max_tracking_loss_ratio: 1.8
+      max_depth_change_ratio: 1.8
+      min_visible_gaussian_ratio: 0.01
+      ema_decay: 0.90
+      max_calls: 0
+    optimization:
+      min_keyframe_gap: 999999

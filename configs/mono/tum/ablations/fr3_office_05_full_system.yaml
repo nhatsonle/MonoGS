@@ -1,0 +1,77 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_03_dust3r_pointmap_scaled.yaml"
+
+Training:
+  lifecycle:
+    enabled: True
+    newborn_grace: 5
+    stable_min_visibility: 5
+    cold_min_age: 30
+    cold_grad_threshold: 0.00001
+    cold_opacity_threshold: 0.7
+    bad_opacity_threshold: 0.02
+    bad_min_visibility: 1
+    bad_patience: 5
+    freeze_cold: True
+    prune_bad: True
+    log_interval: 10
+  dust3r:
+    alignment:
+      enabled: True
+      required: True
+      min_points: 96
+      sample_points: 4096
+      ransac_iterations: 64
+      inlier_threshold: 0.08
+      max_rmse: 0.08
+      opacity_threshold: 0.65
+      min_scale_correction: 0.67
+      max_scale_correction: 1.50
+    selection:
+      enabled: True
+      candidate_pool: 4
+      max_candidate_evals: 1
+      target_baseline: 0.35
+      min_pair_conf: 3.0
+      min_valid_ratio: 0.08
+      min_matches: 512
+      min_score: 1.5
+      max_pointmap_scale_ratio: 1.75
+    init:
+      enabled: True
+      mode: "single_view"
+      max_search_frames: 120
+      min_baseline: 0.25
+      max_baseline: 1.50
+      fallback_to_depth: False
+      only: False
+      prior_only: False
+      backproject_depth: True
+      pcd_downsample: 4
+      point_size_scale: 0.25
+      sample_stride: 2
+      gradient_extra_samples: True
+      gradient_threshold: 0.08
+      gradient_stride: 2
+      max_points: 200000
+      use_pixel_footprint_scale: True
+      pixel_footprint_scale: 0.75
+      use_confidence_mask: True
+      fill_invalid_depth: False
+      selection:
+        candidate_pool: 6
+        max_candidate_evals: 3
+        target_baseline: 0.45
+        min_pair_conf: 3.0
+        min_valid_ratio: 0.08
+        min_matches: 512
+        min_score: 1.5
+        max_pointmap_scale_ratio: 1.75
+    optimization:
+      enabled: True
+      min_keyframe_gap: 3
+      mapping_iters_with_dust3r: 5
+      mapping_iters_without_dust3r: 10
+      preinit_mapping_iters_with_dust3r: 20
+      initial_ba_iters_with_dust3r: 150
+      skip_densify_after_insert: 2
+      min_insert_points_for_fast_mapping: 256

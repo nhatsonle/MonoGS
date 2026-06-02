@@ -33,6 +33,8 @@ Training:
     min_baseline: 0.10
     max_baseline: 1.50
     require_initialized: True
+    pointmap_insert:
+      enabled: True
     depth_min: 0.05
     depth_max: 8.0
     max_point_radius: 10.0

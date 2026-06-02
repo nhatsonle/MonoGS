@@ -130,6 +130,8 @@ def get_result(
     depthmaps_np = [depth.detach().cpu().numpy() for depth in depthmaps]
     confidence_masks = scene.get_masks()
     masks_np = [mask.detach().cpu().numpy().astype(bool) for mask in confidence_masks]
+    confs = scene.get_conf(mode="none")
+    confs_np = [conf.detach().cpu().numpy() for conf in confs]
     imgs = scene.imgs
 
     # Determine which frame is the reference and get relative pose
@@ -167,6 +169,8 @@ def get_result(
         matches_3d1,
         poses_np,
         depthmaps_np,
+        confs_np,
+        int(num_matches),
     )
 
 # Obtain the scale factor based on point matching correspondence and point cloud coordinates    

@@ -28,6 +28,7 @@ class SLAM:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
+        torch.cuda.reset_peak_memory_stats()
         start.record()
 
         self.config = config
@@ -102,11 +103,82 @@ class SLAM:
             q_vis2main=q_vis2main,
         )
 
-        def log_final_gaussian_count(gaussians):
+        def tensor_size_mb(tensor):
+            if not torch.is_tensor(tensor):
+                return 0.0
+            return tensor.nelement() * tensor.element_size() / (1024 * 1024)
+
+        def log_final_gaussian_stats(gaussians):
             if gaussians is None:
-                Log("Final Gaussian count unavailable", tag="Eval")
+                Log("Final Gaussian stats unavailable", tag="Eval")
                 return
+
+            tensor_names = [
+                "_xyz",
+                "_features_dc",
+                "_features_rest",
+                "_scaling",
+                "_rotation",
+                "_opacity",
+                "max_radii2D",
+                "xyz_gradient_accum",
+                "denom",
+                "unique_kfIDs",
+                "n_obs",
+                "lifecycle_age",
+                "lifecycle_visibility",
+                "lifecycle_recent_visibility",
+                "lifecycle_bad_count",
+                "lifecycle_state",
+            ]
+            seen_tensors = set()
+            model_mb = 0.0
+            for name in tensor_names:
+                tensor = getattr(gaussians, name, None)
+                if not torch.is_tensor(tensor) or id(tensor) in seen_tensors:
+                    continue
+                seen_tensors.add(id(tensor))
+                model_mb += tensor_size_mb(tensor)
+
+            optimizer_mb = 0.0
+            optimizer = getattr(gaussians, "optimizer", None)
+            if optimizer is not None:
+                seen_tensors = set()
+                for state in optimizer.state.values():
+                    for value in state.values():
+                        if torch.is_tensor(value) and id(value) not in seen_tensors:
+                            seen_tensors.add(id(value))
+                            optimizer_mb += tensor_size_mb(value)
+
             Log("Final Gaussian count", gaussians.get_xyz.shape[0], tag="Eval")
+            Log("Final Gaussian model memory [MB]", f"{model_mb:.2f}", tag="Eval")
+            Log(
+                "Final Gaussian optimizer state memory [MB]",
+                f"{optimizer_mb:.2f}",
+                tag="Eval",
+            )
+
+        def log_cuda_memory_stats():
+            Log(
+                "CUDA memory allocated [MB]",
+                f"{torch.cuda.memory_allocated() / (1024 * 1024):.2f}",
+                tag="Eval",
+            )
+            Log(
+                "CUDA memory reserved [MB]",
+                f"{torch.cuda.memory_reserved() / (1024 * 1024):.2f}",
+                tag="Eval",
+            )
+            Log(
+                "CUDA max memory allocated [MB]",
+                f"{torch.cuda.max_memory_allocated() / (1024 * 1024):.2f}",
+                tag="Eval",
+            )
+            Log(
+                "CUDA max memory reserved [MB]",
+                f"{torch.cuda.max_memory_reserved() / (1024 * 1024):.2f}",
+                tag="Eval",
+            )
 
         backend_process = mp.Process(target=self.backend.run)
         if self.use_gui:
@@ -200,7 +272,8 @@ class SLAM:
             save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
 
         final_gaussians = self.gaussians if self.eval_rendering else self.frontend.gaussians
-        log_final_gaussian_count(final_gaussians)
+        log_final_gaussian_stats(final_gaussians)
+        log_cuda_memory_stats()
 
         backend_queue.put(["stop"])
         backend_process.join()

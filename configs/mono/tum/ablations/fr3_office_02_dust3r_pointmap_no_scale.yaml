@@ -1,0 +1,22 @@
+inherit_from: "configs/mono/tum/fr3_office.yaml"
+
+Training:
+  mapping_itr_num: 40
+  lifecycle:
+    enabled: False
+  dust3r:
+    enabled: True
+    require_initialized: True
+    min_baseline: 0.25
+    max_baseline: 1.50
+    pointmap_insert:
+      enabled: True
+    scale:
+      baseline_ratio: False
+      pointmap_sync: False
+    insertion:
+      enabled: True
+      opacity_threshold: 0.35
+      rgb_residual_threshold: 0.12
+      min_opacity_floor: 0.08
+      min_points: 128

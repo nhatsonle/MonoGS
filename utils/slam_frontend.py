@@ -56,11 +56,22 @@ class FrontEnd(mp.Process):
         self.dust3r_min_baseline = 0.05
         self.dust3r_max_baseline = 2.0
         self.dust3r_require_initialized = True
+        self.dust3r_pointmap_insert_enabled = True
+        self.dust3r_selection_enabled = False
+        self.dust3r_candidate_pool = 4
+        self.dust3r_max_candidate_evals = 1
+        self.dust3r_target_baseline = 0.0
+        self.dust3r_min_pair_conf = 3.0
+        self.dust3r_min_valid_ratio = 0.05
+        self.dust3r_min_matches = 128
+        self.dust3r_min_score = 0.0
+        self.dust3r_max_pointmap_scale_ratio = 2.0
         self.dust3r_min_keyframe_gap = 0
         self.last_dust3r_kf_count = -1
         self.dust3r_calls = 0
         self.dust3r_time = 0.0
         self.dust3r_init_enabled = False
+        self.dust3r_init_mode = "pair"
         self.dust3r_init_anchor_idx = None
         self.dust3r_init_max_search_frames = 10
         self.dust3r_init_min_baseline = 0.5
@@ -68,7 +79,38 @@ class FrontEnd(mp.Process):
         self.dust3r_init_fallback_to_depth = True
         self.dust3r_init_only = False
         self.dust3r_init_prior_only = False
+        self.dust3r_init_backproject = False
+        self.dust3r_init_candidate_pool = 4
+        self.dust3r_init_max_candidate_evals = 1
+        self.dust3r_init_target_baseline = 0.0
+        self.dust3r_init_min_pair_conf = 3.0
+        self.dust3r_init_min_valid_ratio = 0.05
+        self.dust3r_init_min_matches = 128
+        self.dust3r_init_min_score = 0.0
+        self.dust3r_init_max_pointmap_scale_ratio = 2.0
         self.dust3r_initialized_from_pair = False
+        self.dust3r_refresh_enabled = False
+        self.dust3r_refresh_backproject_depth = True
+        self.dust3r_refresh_force_after_bootstrap = True
+        self.dust3r_refresh_min_frame_gap = 30
+        self.dust3r_refresh_min_keyframe_gap = 2
+        self.dust3r_refresh_candidate_pool = 4
+        self.dust3r_refresh_min_baseline = 0.05
+        self.dust3r_refresh_max_baseline = 1.50
+        self.dust3r_refresh_target_baseline = 0.25
+        self.dust3r_refresh_min_opacity_coverage = 0.18
+        self.dust3r_refresh_opacity_threshold = 0.25
+        self.dust3r_refresh_max_tracking_loss_ratio = 1.8
+        self.dust3r_refresh_max_depth_change_ratio = 1.8
+        self.dust3r_refresh_min_visible_gaussian_ratio = 0.01
+        self.dust3r_refresh_ema_decay = 0.90
+        self.dust3r_refresh_max_calls = 0
+        self.last_dust3r_refresh_frame = -1
+        self.last_dust3r_refresh_kf_count = -1
+        self.dust3r_refresh_call_count = 0
+        self.dust3r_first_refresh_done = False
+        self.tracking_loss_ema = None
+        self.last_dust3r_refresh_depth = None
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -107,12 +149,37 @@ class FrontEnd(mp.Process):
         self.dust3r_require_initialized = bool(
             self.dust3r_config.get("require_initialized", True)
         )
+        pointmap_insert = self.dust3r_config.get("pointmap_insert", {})
+        self.dust3r_pointmap_insert_enabled = bool(
+            pointmap_insert.get("enabled", True)
+        )
+        dust3r_selection = self.dust3r_config.get("selection", {})
+        self.dust3r_selection_enabled = bool(dust3r_selection.get("enabled", False))
+        self.dust3r_candidate_pool = int(dust3r_selection.get("candidate_pool", 4))
+        self.dust3r_max_candidate_evals = int(
+            dust3r_selection.get("max_candidate_evals", 1)
+        )
+        self.dust3r_target_baseline = float(
+            dust3r_selection.get("target_baseline", 0.0)
+        )
+        self.dust3r_min_pair_conf = float(
+            dust3r_selection.get("min_pair_conf", 3.0)
+        )
+        self.dust3r_min_valid_ratio = float(
+            dust3r_selection.get("min_valid_ratio", 0.05)
+        )
+        self.dust3r_min_matches = int(dust3r_selection.get("min_matches", 128))
+        self.dust3r_min_score = float(dust3r_selection.get("min_score", 0.0))
+        self.dust3r_max_pointmap_scale_ratio = float(
+            dust3r_selection.get("max_pointmap_scale_ratio", 2.0)
+        )
         dust3r_optimization = self.dust3r_config.get("optimization", {})
         self.dust3r_min_keyframe_gap = int(
             dust3r_optimization.get("min_keyframe_gap", 0)
         )
         dust3r_init = self.dust3r_config.get("init", {})
         self.dust3r_init_enabled = bool(dust3r_init.get("enabled", False))
+        self.dust3r_init_mode = dust3r_init.get("mode", "pair")
         self.dust3r_init_max_search_frames = int(
             dust3r_init.get("max_search_frames", 10)
         )
@@ -127,6 +194,86 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_init_only = bool(dust3r_init.get("only", False))
         self.dust3r_init_prior_only = bool(dust3r_init.get("prior_only", False))
+        self.dust3r_init_backproject = bool(
+            dust3r_init.get("backproject_depth", False)
+        )
+        dust3r_init_selection = dust3r_init.get("selection", {})
+        self.dust3r_init_candidate_pool = int(
+            dust3r_init_selection.get("candidate_pool", self.dust3r_candidate_pool)
+        )
+        self.dust3r_init_max_candidate_evals = int(
+            dust3r_init_selection.get(
+                "max_candidate_evals", self.dust3r_max_candidate_evals
+            )
+        )
+        self.dust3r_init_target_baseline = float(
+            dust3r_init_selection.get(
+                "target_baseline", self.dust3r_target_baseline
+            )
+        )
+        self.dust3r_init_min_pair_conf = float(
+            dust3r_init_selection.get("min_pair_conf", self.dust3r_min_pair_conf)
+        )
+        self.dust3r_init_min_valid_ratio = float(
+            dust3r_init_selection.get(
+                "min_valid_ratio", self.dust3r_min_valid_ratio
+            )
+        )
+        self.dust3r_init_min_matches = int(
+            dust3r_init_selection.get("min_matches", self.dust3r_min_matches)
+        )
+        self.dust3r_init_min_score = float(
+            dust3r_init_selection.get("min_score", self.dust3r_min_score)
+        )
+        self.dust3r_init_max_pointmap_scale_ratio = float(
+            dust3r_init_selection.get(
+                "max_pointmap_scale_ratio",
+                self.dust3r_max_pointmap_scale_ratio,
+            )
+        )
+        dust3r_refresh = self.dust3r_config.get("refresh", {})
+        self.dust3r_refresh_enabled = bool(dust3r_refresh.get("enabled", False))
+        self.dust3r_refresh_backproject_depth = bool(
+            dust3r_refresh.get("backproject_depth", True)
+        )
+        self.dust3r_refresh_force_after_bootstrap = bool(
+            dust3r_refresh.get("force_after_bootstrap", True)
+        )
+        self.dust3r_refresh_min_frame_gap = int(
+            dust3r_refresh.get("min_frame_gap", 30)
+        )
+        self.dust3r_refresh_min_keyframe_gap = int(
+            dust3r_refresh.get("min_keyframe_gap", 2)
+        )
+        self.dust3r_refresh_candidate_pool = int(
+            dust3r_refresh.get("candidate_pool", self.dust3r_candidate_pool)
+        )
+        self.dust3r_refresh_min_baseline = float(
+            dust3r_refresh.get("min_baseline", self.dust3r_min_baseline)
+        )
+        self.dust3r_refresh_max_baseline = float(
+            dust3r_refresh.get("max_baseline", self.dust3r_max_baseline)
+        )
+        self.dust3r_refresh_target_baseline = float(
+            dust3r_refresh.get("target_baseline", self.dust3r_target_baseline)
+        )
+        self.dust3r_refresh_min_opacity_coverage = float(
+            dust3r_refresh.get("min_opacity_coverage", 0.18)
+        )
+        self.dust3r_refresh_opacity_threshold = float(
+            dust3r_refresh.get("opacity_threshold", 0.25)
+        )
+        self.dust3r_refresh_max_tracking_loss_ratio = float(
+            dust3r_refresh.get("max_tracking_loss_ratio", 1.8)
+        )
+        self.dust3r_refresh_max_depth_change_ratio = float(
+            dust3r_refresh.get("max_depth_change_ratio", 1.8)
+        )
+        self.dust3r_refresh_min_visible_gaussian_ratio = float(
+            dust3r_refresh.get("min_visible_gaussian_ratio", 0.01)
+        )
+        self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
+        self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -208,6 +355,12 @@ class FrontEnd(mp.Process):
         if clear_dust3r_anchor:
             self.dust3r_init_anchor_idx = None
             self.dust3r_initialized_from_pair = False
+            self.last_dust3r_refresh_frame = -1
+            self.last_dust3r_refresh_kf_count = -1
+            self.dust3r_refresh_call_count = 0
+            self.dust3r_first_refresh_done = False
+            self.tracking_loss_ema = None
+            self.last_dust3r_refresh_depth = None
 
     def should_use_dust3r_initialization(self):
         return (
@@ -216,6 +369,53 @@ class FrontEnd(mp.Process):
             and self.dust3r_model is not None
             and self.dust3r_init_enabled
         )
+
+    def initialize_dust3r_single_view(self, cur_frame_idx, viewpoint):
+        self.clear_frontend_map_state(clear_dust3r_anchor=True)
+        while not self.backend_queue.empty():
+            self.backend_queue.get()
+
+        viewpoint.update_RT(
+            torch.eye(3, device=viewpoint.device),
+            torch.zeros(3, device=viewpoint.device),
+        )
+        dust3r_payload = self.prepare_keyframe_dust3r(
+            cur_frame_idx, cur_frame_idx, init=True
+        )
+        if dust3r_payload is None:
+            if not self.dust3r_init_fallback_to_depth:
+                Log(
+                    f"DUSt3R single-view initialization failed at frame "
+                    f"{cur_frame_idx}; waiting because fallback_to_depth=False"
+                )
+                return False
+            self.initialize(cur_frame_idx, viewpoint)
+            return True
+
+        dust3r_payload = dict(dust3r_payload)
+        dust3r_payload["bootstrap"] = "single_view"
+        dust3r_payload["backproject_depth"] = self.dust3r_init_backproject
+        if not self.dust3r_payload_passes_quality(dust3r_payload, init=True):
+            if not self.dust3r_init_fallback_to_depth:
+                Log(
+                    f"DUSt3R single-view initialization quality failed at frame "
+                    f"{cur_frame_idx}; waiting because fallback_to_depth=False"
+                )
+                return False
+            self.initialize(cur_frame_idx, viewpoint)
+            return True
+
+        self.kf_indices = [cur_frame_idx]
+        self.initialized = True
+        self.dust3r_initialized_from_pair = True
+        self.dust3r_init_anchor_idx = cur_frame_idx
+        self.last_dust3r_refresh_frame = cur_frame_idx
+        self.last_dust3r_refresh_kf_count = len(self.kf_indices)
+        self.last_dust3r_refresh_depth = None
+        self.request_init(cur_frame_idx, viewpoint, None, dust3r_payload)
+        self.reset = False
+        Log(f"Initialized map request with DUSt3R single-view frame {cur_frame_idx}")
+        return True
 
     def start_dust3r_initialization(self, cur_frame_idx, viewpoint):
         self.clear_frontend_map_state(clear_dust3r_anchor=False)
@@ -241,13 +441,10 @@ class FrontEnd(mp.Process):
             self.get_camera_center(cur_frame_idx) - self.get_camera_center(anchor_idx)
         ).item()
         searched_frames = cur_frame_idx - anchor_idx
-        baseline_ready = baseline >= self.dust3r_init_min_baseline and (
-            self.dust3r_init_max_baseline <= 0
-            or baseline <= self.dust3r_init_max_baseline
-        )
         search_exhausted = searched_frames >= self.dust3r_init_max_search_frames
 
-        if not baseline_ready and not search_exhausted:
+        ref_candidates = self.get_dust3r_initialization_candidates(cur_frame_idx)
+        if not ref_candidates and not search_exhausted:
             Log(
                 f"Waiting for DUSt3R init baseline: frame {cur_frame_idx}, "
                 f"baseline {baseline:.4f}m < {self.dust3r_init_min_baseline:.4f}m"
@@ -255,9 +452,11 @@ class FrontEnd(mp.Process):
             return False
 
         dust3r_payload = None
-        if baseline_ready:
-            dust3r_payload = self.prepare_keyframe_dust3r(
-                cur_frame_idx, anchor_idx, init=True
+        if ref_candidates:
+            dust3r_payload = self.prepare_best_keyframe_dust3r(
+                cur_frame_idx,
+                init=True,
+                ref_candidates=ref_candidates,
             )
 
         if dust3r_payload is not None:
@@ -275,7 +474,8 @@ class FrontEnd(mp.Process):
             Log(
                 f"Initialized map request with DUSt3R "
                 f"{'prior' if self.dust3r_init_prior_only else 'pair'} "
-                f"{cur_frame_idx}<->{anchor_idx} (baseline {baseline:.4f}m)"
+                f"{cur_frame_idx}<->{dust3r_payload['reference_frame_idx']} "
+                f"(baseline {baseline:.4f}m)"
             )
             return True
 
@@ -323,7 +523,54 @@ class FrontEnd(mp.Process):
         c2w = torch.linalg.inv(getWorld2View2(viewpoint.R, viewpoint.T))
         return c2w[:3, 3]
 
+    def get_dust3r_reference_candidates(
+        self,
+        cur_frame_idx,
+        frame_indices,
+        min_baseline,
+        max_baseline,
+        candidate_pool=1,
+        target_baseline=0.0,
+    ):
+        cur_center = self.get_camera_center(cur_frame_idx)
+        valid_candidates = []
+        for idx in frame_indices:
+            if idx == cur_frame_idx or idx not in self.cameras:
+                continue
+            baseline = torch.norm(cur_center - self.get_camera_center(idx)).item()
+            if baseline < min_baseline:
+                continue
+            if max_baseline > 0 and baseline > max_baseline:
+                continue
+            valid_candidates.append((idx, baseline))
+
+        if not valid_candidates:
+            return []
+
+        if target_baseline <= 0:
+            if max_baseline > min_baseline:
+                target_baseline = 0.5 * (min_baseline + max_baseline)
+            else:
+                target_baseline = min_baseline
+        valid_candidates.sort(key=lambda item: abs(item[1] - target_baseline))
+        if candidate_pool > 0:
+            valid_candidates = valid_candidates[:candidate_pool]
+        return valid_candidates
+
+    def get_dust3r_initialization_candidates(self, cur_frame_idx):
+        candidate_indices = sorted(idx for idx in self.cameras if idx != cur_frame_idx)
+        return self.get_dust3r_reference_candidates(
+            cur_frame_idx,
+            candidate_indices,
+            self.dust3r_init_min_baseline,
+            self.dust3r_init_max_baseline,
+            candidate_pool=self.dust3r_init_candidate_pool,
+            target_baseline=self.dust3r_init_target_baseline,
+        )
+
     def select_dust3r_reference_keyframe(self, cur_frame_idx):
+        if not self.dust3r_pointmap_insert_enabled:
+            return None
         if self.dust3r_init_only and self.dust3r_initialized_from_pair:
             return None
         if self.dust3r_require_initialized and not self.initialized:
@@ -337,20 +584,18 @@ class FrontEnd(mp.Process):
                 )
                 return None
 
-        candidates = [idx for idx in self.kf_indices if idx != cur_frame_idx]
-        if not candidates:
+        candidate_indices = [idx for idx in self.kf_indices if idx != cur_frame_idx]
+        if not candidate_indices:
             return None
 
-        cur_center = self.get_camera_center(cur_frame_idx)
-        valid_candidates = []
-        for idx in candidates:
-            baseline = torch.norm(cur_center - self.get_camera_center(idx)).item()
-            if baseline < self.dust3r_min_baseline:
-                continue
-            if self.dust3r_max_baseline > 0 and baseline > self.dust3r_max_baseline:
-                continue
-            valid_candidates.append((idx, baseline))
-
+        valid_candidates = self.get_dust3r_reference_candidates(
+            cur_frame_idx,
+            candidate_indices,
+            self.dust3r_min_baseline,
+            self.dust3r_max_baseline,
+            candidate_pool=1,
+            target_baseline=self.dust3r_min_baseline,
+        )
         if not valid_candidates:
             Log(
                 f"Skipping DUSt3R for kf {cur_frame_idx}: no reference keyframe "
@@ -365,6 +610,307 @@ class FrontEnd(mp.Process):
             f"(baseline {baseline:.4f}m)"
         )
         return ref_idx
+
+    def summarize_dust3r_payload(self, dust3r_payload):
+        masks = dust3r_payload.get("masks", [])
+        confs = dust3r_payload.get("confs", [])
+        quality_indices = range(len(masks))
+
+        valid_ratios = []
+        mean_confs = []
+        for idx in quality_indices:
+            if idx >= len(masks) or masks[idx] is None:
+                continue
+            mask = np.asarray(masks[idx]).astype(bool)
+            valid_ratios.append(float(np.count_nonzero(mask)) / float(mask.size))
+            if idx < len(confs) and confs[idx] is not None:
+                conf = np.asarray(confs[idx], dtype=np.float32)
+                if mask.any():
+                    mean_confs.append(float(conf[mask].mean()))
+                else:
+                    mean_confs.append(0.0)
+
+        valid_ratio = min(valid_ratios) if valid_ratios else 0.0
+        mean_conf = min(mean_confs) if mean_confs else 0.0
+        match_count = int(dust3r_payload.get("match_count", 0))
+        pointmap_scale_divisors = dust3r_payload.get("pointmap_scale_divisors", [])
+        if len(pointmap_scale_divisors) >= 2:
+            scale_ratio = abs(
+                float(pointmap_scale_divisors[1])
+                / max(abs(float(pointmap_scale_divisors[0])), 1e-8)
+            )
+        else:
+            scale_ratio = 1.0
+        score = mean_conf * np.log1p(max(match_count, 0)) * max(valid_ratio, 1e-6)
+        return {
+            "valid_ratio": valid_ratio,
+            "mean_conf": mean_conf,
+            "match_count": match_count,
+            "scale_ratio": scale_ratio,
+            "score": float(score),
+        }
+
+    def dust3r_payload_passes_quality(self, dust3r_payload, init=False):
+        if init:
+            min_pair_conf = self.dust3r_init_min_pair_conf
+            min_valid_ratio = self.dust3r_init_min_valid_ratio
+            min_matches = self.dust3r_init_min_matches
+            min_score = self.dust3r_init_min_score
+            max_scale_ratio = self.dust3r_init_max_pointmap_scale_ratio
+        else:
+            min_pair_conf = self.dust3r_min_pair_conf
+            min_valid_ratio = self.dust3r_min_valid_ratio
+            min_matches = self.dust3r_min_matches
+            min_score = self.dust3r_min_score
+            max_scale_ratio = self.dust3r_max_pointmap_scale_ratio
+
+        stats = self.summarize_dust3r_payload(dust3r_payload)
+        dust3r_payload["quality"] = stats
+        checks = [
+            stats["mean_conf"] >= min_pair_conf,
+            stats["valid_ratio"] >= min_valid_ratio,
+            stats["match_count"] >= min_matches,
+            stats["score"] >= min_score,
+            stats["scale_ratio"] <= max_scale_ratio,
+        ]
+        if all(checks):
+            return True
+
+        Log(
+            "Rejecting DUSt3R payload: "
+            f"conf={stats['mean_conf']:.3f}/{min_pair_conf:.3f}, "
+            f"valid={stats['valid_ratio']:.3f}/{min_valid_ratio:.3f}, "
+            f"matches={stats['match_count']}/{min_matches}, "
+            f"score={stats['score']:.3f}/{min_score:.3f}, "
+            f"scale_ratio={stats['scale_ratio']:.3f}/{max_scale_ratio:.3f}"
+        )
+        return False
+
+    def prepare_best_keyframe_dust3r(self, cur_frame_idx, init=False, ref_candidates=None):
+        if not self.use_dust3r or self.dust3r_model is None:
+            return None
+        if not init and not self.dust3r_pointmap_insert_enabled:
+            return None
+        selection_enabled = self.dust3r_selection_enabled
+        max_candidate_evals = (
+            self.dust3r_init_max_candidate_evals
+            if init
+            else self.dust3r_max_candidate_evals
+        )
+        if ref_candidates is None:
+            if self.dust3r_init_only and self.dust3r_initialized_from_pair:
+                return None
+            if self.dust3r_require_initialized and not self.initialized:
+                return None
+            candidate_indices = [idx for idx in self.kf_indices if idx != cur_frame_idx]
+            ref_candidates = self.get_dust3r_reference_candidates(
+                cur_frame_idx,
+                candidate_indices,
+                self.dust3r_min_baseline,
+                self.dust3r_max_baseline,
+                candidate_pool=self.dust3r_candidate_pool,
+                target_baseline=self.dust3r_target_baseline,
+            )
+
+        if not ref_candidates:
+            return None
+
+        if not selection_enabled:
+            ref_frame_idx = ref_candidates[0][0]
+            payload = self.prepare_keyframe_dust3r(
+                cur_frame_idx, ref_frame_idx, init=init
+            )
+            if payload is not None:
+                self.last_dust3r_kf_count = len(self.kf_indices)
+            return payload
+
+        best_payload = None
+        best_stats = None
+        max_candidate_evals = max(1, max_candidate_evals)
+        for ref_frame_idx, baseline in ref_candidates[:max_candidate_evals]:
+            payload = self.prepare_keyframe_dust3r(
+                cur_frame_idx, ref_frame_idx, init=init
+            )
+            if payload is None:
+                continue
+            stats = self.summarize_dust3r_payload(payload)
+            payload["quality"] = stats
+            Log(
+                "DUSt3R candidate quality: "
+                f"kf {cur_frame_idx}, ref {ref_frame_idx}, "
+                f"baseline {baseline:.4f}m, conf {stats['mean_conf']:.3f}, "
+                f"valid {stats['valid_ratio']:.3f}, "
+                f"matches {stats['match_count']}, "
+                f"scale_ratio {stats['scale_ratio']:.3f}, "
+                f"score {stats['score']:.3f}"
+            )
+            if not self.dust3r_payload_passes_quality(payload, init=init):
+                continue
+            if best_stats is None or stats["score"] > best_stats["score"]:
+                best_payload = payload
+                best_stats = stats
+
+        if best_payload is not None:
+            self.last_dust3r_kf_count = len(self.kf_indices)
+            Log(
+                "Selected DUSt3R payload: "
+                f"kf {cur_frame_idx}, ref {best_payload['reference_frame_idx']}, "
+                f"score {best_stats['score']:.3f}"
+            )
+        return best_payload
+
+    def update_tracking_health(self, render_pkg, curr_visibility):
+        tracking_loss = render_pkg.get("tracking_loss", None)
+        if tracking_loss is None:
+            tracking_loss = 0.0
+        tracking_loss = float(tracking_loss)
+        prev_ema = self.tracking_loss_ema
+        if prev_ema is None:
+            loss_ratio = 1.0
+            self.tracking_loss_ema = tracking_loss
+        else:
+            loss_ratio = tracking_loss / max(prev_ema, 1e-8)
+            decay = float(np.clip(self.dust3r_refresh_ema_decay, 0.0, 0.999))
+            self.tracking_loss_ema = decay * prev_ema + (1.0 - decay) * tracking_loss
+
+        opacity = render_pkg.get("opacity", None)
+        if opacity is None:
+            opacity_coverage = 1.0
+        else:
+            opacity_coverage = float(
+                (opacity.detach() > self.dust3r_refresh_opacity_threshold)
+                .float()
+                .mean()
+                .item()
+            )
+
+        if curr_visibility.numel() == 0:
+            visible_ratio = 0.0
+        else:
+            visible_ratio = float(
+                curr_visibility.count_nonzero().item() / curr_visibility.numel()
+            )
+
+        median_depth = render_pkg.get("median_depth", self.median_depth)
+        if hasattr(median_depth, "detach"):
+            median_depth = float(median_depth.detach().item())
+        else:
+            median_depth = float(median_depth)
+        if (
+            self.last_dust3r_refresh_depth is None
+            or median_depth <= 1e-8
+            or self.last_dust3r_refresh_depth <= 1e-8
+        ):
+            depth_ratio = 1.0
+        else:
+            depth_ratio = max(
+                median_depth / self.last_dust3r_refresh_depth,
+                self.last_dust3r_refresh_depth / median_depth,
+            )
+
+        return {
+            "tracking_loss": tracking_loss,
+            "loss_ratio": loss_ratio,
+            "opacity_coverage": opacity_coverage,
+            "visible_ratio": visible_ratio,
+            "median_depth": median_depth,
+            "depth_ratio": depth_ratio,
+        }
+
+    def should_trigger_dust3r_refresh(self, cur_frame_idx, health):
+        if (
+            not self.dust3r_refresh_enabled
+            or not self.use_dust3r
+            or self.dust3r_model is None
+            or not self.initialized
+            or len(self.current_window) == 0
+        ):
+            return False, None
+        if self.dust3r_refresh_max_calls > 0 and (
+            self.dust3r_refresh_call_count >= self.dust3r_refresh_max_calls
+        ):
+            return False, None
+
+        frame_gap = (
+            cur_frame_idx - self.last_dust3r_refresh_frame
+            if self.last_dust3r_refresh_frame >= 0
+            else cur_frame_idx + 1
+        )
+        keyframe_gap = (
+            len(self.kf_indices) - self.last_dust3r_refresh_kf_count
+            if self.last_dust3r_refresh_kf_count >= 0
+            else len(self.kf_indices)
+        )
+
+        if (
+            self.dust3r_refresh_force_after_bootstrap
+            and not self.dust3r_first_refresh_done
+            and cur_frame_idx > self.current_window[-1]
+        ):
+            return True, "initial_multiview"
+
+        if frame_gap < self.dust3r_refresh_min_frame_gap:
+            return False, None
+        if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
+            return False, None
+
+        if health["opacity_coverage"] < self.dust3r_refresh_min_opacity_coverage:
+            return True, "low_opacity_coverage"
+        if health["visible_ratio"] < self.dust3r_refresh_min_visible_gaussian_ratio:
+            return True, "low_visible_gaussian_ratio"
+        if health["loss_ratio"] > self.dust3r_refresh_max_tracking_loss_ratio:
+            return True, "tracking_loss_spike"
+        if health["depth_ratio"] > self.dust3r_refresh_max_depth_change_ratio:
+            return True, "depth_distribution_shift"
+        return False, None
+
+    def prepare_dust3r_refresh_payload(self, cur_frame_idx, reason):
+        if reason == "initial_multiview":
+            self.dust3r_first_refresh_done = True
+        candidate_indices = [idx for idx in self.current_window if idx != cur_frame_idx]
+        if not candidate_indices:
+            candidate_indices = [idx for idx in self.kf_indices if idx != cur_frame_idx]
+
+        ref_candidates = self.get_dust3r_reference_candidates(
+            cur_frame_idx,
+            candidate_indices,
+            self.dust3r_refresh_min_baseline,
+            self.dust3r_refresh_max_baseline,
+            candidate_pool=self.dust3r_refresh_candidate_pool,
+            target_baseline=self.dust3r_refresh_target_baseline,
+        )
+        if not ref_candidates and reason == "initial_multiview" and candidate_indices:
+            ref_idx = candidate_indices[0]
+            baseline = torch.norm(
+                self.get_camera_center(cur_frame_idx) - self.get_camera_center(ref_idx)
+            ).item()
+            ref_candidates = [(ref_idx, baseline)]
+
+        if not ref_candidates:
+            Log(f"Skipping DUSt3R refresh for frame {cur_frame_idx}: no reference")
+            return None
+
+        payload = self.prepare_best_keyframe_dust3r(
+            cur_frame_idx,
+            init=False,
+            ref_candidates=ref_candidates,
+        )
+        if payload is None:
+            Log(f"DUSt3R refresh rejected for frame {cur_frame_idx}: {reason}")
+            return None
+
+        payload = dict(payload)
+        payload["refresh"] = True
+        payload["refresh_reason"] = reason
+        payload["backproject_depth"] = self.dust3r_refresh_backproject_depth
+        self.last_dust3r_refresh_frame = cur_frame_idx
+        self.last_dust3r_refresh_kf_count = len(self.kf_indices)
+        self.dust3r_refresh_call_count += 1
+        Log(
+            f"DUSt3R refresh accepted for frame {cur_frame_idx}: "
+            f"{reason}, ref {payload['reference_frame_idx']}"
+        )
+        return payload
 
     def estimate_dust3r_scale(self, trans_pose, cur_frame_idx, ref_frame_idx):
         if not self.dust3r_use_baseline_ratio_scale:
@@ -513,13 +1059,15 @@ class FrontEnd(mp.Process):
                 _matches_3d1,
                 poses,
                 depthmaps,
+                confs,
+                match_count,
             ) = self.run_dust3r_pair(
                 viewpoint.original_image,
                 ref_viewpoint.original_image,
                 tag=f"kf {cur_frame_idx}<->{ref_frame_idx}",
             )
         except Exception as exc:
-            Log(f"DUSt3R inference failed, falling back to depth init: {exc}")
+            Log(f"DUSt3R inference failed for pair {cur_frame_idx}<->{ref_frame_idx}: {exc}")
             return None
 
         scale_divisor = self.estimate_dust3r_scale(
@@ -539,14 +1087,15 @@ class FrontEnd(mp.Process):
             f"DUSt3R keyframe payload: kf {cur_frame_idx}, ref {ref_frame_idx}, "
             f"world {world_frame_idx}, scale divisor {scale_divisor:.4f}"
         )
-        self.last_dust3r_kf_count = len(self.kf_indices)
         world_viewpoint = self.cameras[world_frame_idx]
         return {
             "pts3d": pts3d,
             "imgs": imgs,
             "masks": masks,
+            "confs": confs,
             "poses": poses,
             "depthmaps": depthmaps,
+            "match_count": match_count,
             "scale": scale_divisor,
             "pointmap_scale_divisors": pointmap_scale_divisors,
             "reference_idx": reference_idx,
@@ -602,6 +1151,7 @@ class FrontEnd(mp.Process):
         )
 
         pose_optimizer = torch.optim.Adam(opt_params)
+        tracking_loss_value = None
         for tracking_itr in range(self.tracking_itr_num):
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
@@ -615,6 +1165,7 @@ class FrontEnd(mp.Process):
             loss_tracking = get_loss_tracking(
                 self.config, image, depth, opacity, viewpoint
             )
+            tracking_loss_value = float(loss_tracking.detach().item())
             loss_tracking.backward()
 
             with torch.no_grad():
@@ -635,6 +1186,8 @@ class FrontEnd(mp.Process):
                 break
 
         self.median_depth = get_median_depth(depth, opacity)
+        render_pkg["tracking_loss"] = tracking_loss_value
+        render_pkg["median_depth"] = self.median_depth
         return render_pkg
 
     def is_keyframe(
@@ -839,9 +1392,14 @@ class FrontEnd(mp.Process):
 
                 if self.reset:
                     if self.should_use_dust3r_initialization():
-                        initialized = self.try_dust3r_initialization(
-                            cur_frame_idx, viewpoint
-                        )
+                        if self.dust3r_init_mode == "single_view":
+                            initialized = self.initialize_dust3r_single_view(
+                                cur_frame_idx, viewpoint
+                            )
+                        else:
+                            initialized = self.try_dust3r_initialization(
+                                cur_frame_idx, viewpoint
+                            )
                         if initialized:
                             self.current_window.append(cur_frame_idx)
                     else:
@@ -878,6 +1436,10 @@ class FrontEnd(mp.Process):
                 last_keyframe_idx = self.current_window[0]
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
+                health = self.update_tracking_health(render_pkg, curr_visibility)
+                refresh_requested, refresh_reason = self.should_trigger_dust3r_refresh(
+                    cur_frame_idx, health
+                )
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
@@ -903,6 +1465,8 @@ class FrontEnd(mp.Process):
                         create_kf
                         and (cur_frame_idx - last_keyframe_idx) >= self.kf_min_interval
                     )
+                if refresh_requested:
+                    create_kf = True
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
@@ -925,13 +1489,33 @@ class FrontEnd(mp.Process):
                     )
                     dust3r_payload = None
                     if self.use_dust3r and self.dust3r_model is not None:
-                        ref_frame_idx = self.select_dust3r_reference_keyframe(
-                            cur_frame_idx
-                        )
-                        if ref_frame_idx is not None:
-                            dust3r_payload = self.prepare_keyframe_dust3r(
-                                cur_frame_idx, ref_frame_idx
+                        if refresh_requested:
+                            Log(
+                                f"Requesting DUSt3R refresh at frame {cur_frame_idx}: "
+                                f"{refresh_reason}, loss_ratio={health['loss_ratio']:.3f}, "
+                                f"opacity={health['opacity_coverage']:.3f}, "
+                                f"visible={health['visible_ratio']:.3f}, "
+                                f"depth_ratio={health['depth_ratio']:.3f}"
                             )
+                            dust3r_payload = self.prepare_dust3r_refresh_payload(
+                                cur_frame_idx, refresh_reason
+                            )
+                            if dust3r_payload is not None:
+                                self.last_dust3r_refresh_depth = health["median_depth"]
+                        elif self.dust3r_selection_enabled:
+                            dust3r_payload = self.prepare_best_keyframe_dust3r(
+                                cur_frame_idx
+                            )
+                        else:
+                            ref_frame_idx = self.select_dust3r_reference_keyframe(
+                                cur_frame_idx
+                            )
+                            if ref_frame_idx is not None:
+                                dust3r_payload = self.prepare_keyframe_dust3r(
+                                    cur_frame_idx, ref_frame_idx
+                                )
+                                if dust3r_payload is not None:
+                                    self.last_dust3r_kf_count = len(self.kf_indices)
                     self.request_keyframe(
                         cur_frame_idx,
                         viewpoint,

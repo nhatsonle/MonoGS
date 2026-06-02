@@ -67,6 +67,10 @@ class BackEnd(mp.Process):
             else False
         )
         dust3r_config = self.config["Training"].get("dust3r", {})
+        pointmap_insert = dust3r_config.get("pointmap_insert", {})
+        self.dust3r_pointmap_insert_enabled = bool(
+            pointmap_insert.get("enabled", True)
+        )
         insertion = dust3r_config.get("insertion", {})
         self.dust3r_insertion_enabled = bool(insertion.get("enabled", True))
         self.dust3r_opacity_threshold = float(
@@ -107,8 +111,12 @@ class BackEnd(mp.Process):
             dust3r_optimization.get("enabled", False)
         )
         dust3r_init = dust3r_config.get("init", {})
+        self.dust3r_init_enabled = bool(dust3r_init.get("enabled", False))
         self.dust3r_init_backproject = bool(
             dust3r_init.get("backproject_depth", False)
+        )
+        self.dust3r_init_fallback_to_depth = bool(
+            dust3r_init.get("fallback_to_depth", True)
         )
         self.dust3r_init_prior_only = bool(dust3r_init.get("prior_only", False))
         self.dust3r_init_depth_prior_weight = float(
@@ -162,6 +170,19 @@ class BackEnd(mp.Process):
         self, frame_idx, viewpoint, dust3r_payload, init=False, depth_map=None
     ):
         if dust3r_payload is None or dust3r_payload.get("regularization_only", False):
+            if (
+                init
+                and self.dust3r_init_enabled
+                and not self.dust3r_init_fallback_to_depth
+                and dust3r_payload is None
+            ):
+                raise RuntimeError(
+                    "DUSt3R init was requested with fallback_to_depth=False, "
+                    "but no DUSt3R payload was provided"
+                )
+            self.try_add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
+            return False, 0
+        if not init and not self.dust3r_pointmap_insert_enabled:
             self.try_add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
 
@@ -205,11 +226,11 @@ class BackEnd(mp.Process):
                 return False, 0
 
         try:
-            if (
-                init
-                and self.dust3r_init_backproject
-                and dust3r_payload.get("depthmaps") is not None
-            ):
+            use_dust3r_depth = (
+                dust3r_payload.get("backproject_depth", False)
+                or (init and self.dust3r_init_backproject)
+            ) and dust3r_payload.get("depthmaps") is not None
+            if use_dust3r_depth:
                 pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
                 pointmap_index = pointmap_indices[0]
                 pointmap_scale_divisors = dust3r_payload.get(
@@ -262,7 +283,15 @@ class BackEnd(mp.Process):
                 )
             return use_fast_mapping, inserted_points
         except Exception as exc:
-            Log(f"DUSt3R Gaussian init failed, falling back to depth init: {exc}")
+            if init and not self.dust3r_init_fallback_to_depth:
+                raise RuntimeError(
+                    "DUSt3R Gaussian init failed and fallback_to_depth=False; "
+                    "not falling back to depth init"
+                ) from exc
+            Log(
+                "DUSt3R Gaussian init failed, falling back to depth/pseudo-depth "
+                f"init: {exc}"
+            )
             self.try_add_next_kf(frame_idx, viewpoint, init=init, depth_map=depth_map)
             return False, 0
 
@@ -1021,8 +1050,9 @@ class BackEnd(mp.Process):
                         and inserted_points > 0
                     ):
                         self.initialized = True
+                        bootstrap = dust3r_payload.get("bootstrap", "pair")
                         Log(
-                            f"Initialized SLAM from DUSt3R pair "
+                            f"Initialized SLAM from DUSt3R {bootstrap} "
                             f"({inserted_points} Gaussians)"
                         )
                     self.push_to_frontend("init")

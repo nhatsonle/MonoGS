@@ -1,0 +1,16 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_00_monogs.yaml"
+
+Training:
+  lifecycle:
+    enabled: True
+    newborn_grace: 5
+    stable_min_visibility: 5
+    cold_min_age: 30
+    cold_grad_threshold: 0.0001
+    cold_opacity_threshold: 0.7
+    bad_opacity_threshold: 0.02
+    bad_min_visibility: 1
+    bad_patience: 5
+    freeze_cold: True
+    prune_bad: True
+    log_interval: 10
