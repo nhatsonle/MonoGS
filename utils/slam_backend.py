@@ -105,6 +105,12 @@ class BackEnd(mp.Process):
         lifecycle_config = self.config["Training"].get("lifecycle", {})
         self.lifecycle_enabled = bool(lifecycle_config.get("enabled", False))
         self.lifecycle_prune_bad = bool(lifecycle_config.get("prune_bad", True))
+        self.lifecycle_prune_bad_local_only = bool(
+            lifecycle_config.get("prune_bad_local_only", True)
+        )
+        self.lifecycle_protect_newborn_from_prune = bool(
+            lifecycle_config.get("protect_newborn_from_prune", False)
+        )
         self.lifecycle_log_interval = int(lifecycle_config.get("log_interval", 10))
         dust3r_optimization = dust3r_config.get("optimization", {})
         self.dust3r_optimization_enabled = bool(
@@ -264,6 +270,8 @@ class BackEnd(mp.Process):
                     )
                 )
             inserted_points = fused_point_cloud.shape[0]
+            if inserted_points <= 0:
+                raise ValueError("DUSt3R payload produced zero Gaussian points")
             self.gaussians.extend_from_pcd(
                 fused_point_cloud, features, scales, rots, opacities, frame_idx
             )
@@ -683,6 +691,11 @@ class BackEnd(mp.Process):
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
             )
+            if render_pkg is None:
+                raise RuntimeError(
+                    "Cannot initialize map because no Gaussians are available to render. "
+                    "Check DUSt3R init masks/depth scale or enable init fallback_to_depth."
+                )
             (
                 image,
                 viewspace_point_tensor,
@@ -868,13 +881,25 @@ class BackEnd(mp.Process):
                                 self.gaussians.n_obs <= prune_coviz, mask
                             )
                         if to_prune is not None and self.monocular:
+                            local_prune_scope = None
+                            if prune_mode == "slam":
+                                local_prune_scope = mask
                             to_prune = to_prune.cuda()
                             if self.lifecycle_enabled:
-                                newborn = self.gaussians.lifecycle_state == 0
-                                to_prune = torch.logical_and(to_prune, ~newborn)
+                                if self.lifecycle_protect_newborn_from_prune:
+                                    newborn = self.gaussians.lifecycle_state == 0
+                                    to_prune = torch.logical_and(to_prune, ~newborn)
                                 if self.lifecycle_prune_bad:
                                     bad = self.gaussians.bad_mask()
                                     if bad is not None:
+                                        if (
+                                            self.lifecycle_prune_bad_local_only
+                                            and local_prune_scope is not None
+                                        ):
+                                            bad = torch.logical_and(
+                                                bad,
+                                                local_prune_scope.to(device=bad.device),
+                                            )
                                         to_prune = torch.logical_or(to_prune, bad)
                             self.gaussians.prune_points(to_prune.cuda())
                             for idx in range((len(current_window))):

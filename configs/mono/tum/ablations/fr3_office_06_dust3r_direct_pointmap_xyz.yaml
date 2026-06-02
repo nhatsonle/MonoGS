@@ -1,0 +1,13 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_05_full_system.yaml"
+
+Training:
+  dust3r:
+    init:
+      # Direct DUSt3R pointmap XYZ init:
+      # use create_pcd_from_dust3r(...) instead of taking pointmap z as depth
+      # and backprojecting with the SLAM camera intrinsics.
+      backproject_depth: False
+      depth_scale:
+        enabled: False
+    refresh:
+      enabled: False

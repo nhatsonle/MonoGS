@@ -9,6 +9,8 @@ Results:
   use_wandb: False
 
 Dataset:
+  dataset_path: "datasets/tum/rgbd_dataset_freiburg3_long_office_household"
+  num_frames: 1350
   type: 'tum'
   sensor_type: 'depth'
   pcd_downsample: 128

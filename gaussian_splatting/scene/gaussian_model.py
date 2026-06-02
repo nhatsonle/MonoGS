@@ -123,15 +123,24 @@ class GaussianModel:
         cold_opacity_threshold = float(cfg.get("cold_opacity_threshold", 0.6))
         bad_opacity_threshold = float(cfg.get("bad_opacity_threshold", 0.05))
         bad_min_visibility = int(cfg.get("bad_min_visibility", 1))
+        bad_use_recent_visibility = bool(
+            cfg.get("bad_use_recent_visibility", False)
+        )
         bad_patience = int(cfg.get("bad_patience", 3))
 
         past_grace = self.lifecycle_age > newborn_grace
-        bad_candidate = past_grace & (
-            (opacity < bad_opacity_threshold)
-            | (self.lifecycle_recent_visibility < bad_min_visibility)
-        )
+        bad_candidate = past_grace & (opacity < bad_opacity_threshold)
+        if bad_use_recent_visibility and bad_min_visibility > 0:
+            low_recent_visibility = (
+                self.lifecycle_recent_visibility < bad_min_visibility
+            )
+            bad_candidate = torch.logical_or(
+                bad_candidate, past_grace & low_recent_visibility
+            )
         self.lifecycle_bad_count = torch.where(
-            bad_candidate, self.lifecycle_bad_count + 1, torch.zeros_like(self.lifecycle_bad_count)
+            bad_candidate,
+            self.lifecycle_bad_count + 1,
+            torch.zeros_like(self.lifecycle_bad_count),
         )
 
         bad = self.lifecycle_bad_count >= bad_patience
@@ -1217,7 +1226,15 @@ class GaussianModel:
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
-        if self.lifecycle_enabled() and self.lifecycle_state.shape[0] == grads.shape[0]:
+        lifecycle_config = self.config["Training"].get("lifecycle", {})
+        suppress_cold_densify = bool(
+            lifecycle_config.get("suppress_cold_densify", False)
+        )
+        if (
+            suppress_cold_densify
+            and self.lifecycle_enabled()
+            and self.lifecycle_state.shape[0] == grads.shape[0]
+        ):
             cold = self.lifecycle_state == 2
             grads[cold] = 0.0
 
@@ -1225,7 +1242,14 @@ class GaussianModel:
         self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if self.lifecycle_enabled() and self.lifecycle_state.shape[0] == prune_mask.shape[0]:
+        protect_newborn_from_prune = bool(
+            lifecycle_config.get("protect_newborn_from_prune", False)
+        )
+        if (
+            protect_newborn_from_prune
+            and self.lifecycle_enabled()
+            and self.lifecycle_state.shape[0] == prune_mask.shape[0]
+        ):
             prune_mask = torch.logical_and(prune_mask, self.lifecycle_state != 0)
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size

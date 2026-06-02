@@ -1,0 +1,11 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# Ablation from config 04:
+# Disable DUSt3R depth bootstrap and event refresh.
+# This keeps the config-04 lifecycle controller enabled, so the comparison
+# isolates the contribution of DUSt3R-derived depth against MonoGS pseudo-depth.
+
+Training:
+  dust3r:
+    enabled: False
+

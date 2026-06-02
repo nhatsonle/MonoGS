@@ -1,0 +1,8 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+Dataset:
+  num_frames: 1350
+
+Results:
+  eval_rendering: True
+  color_refinement: False

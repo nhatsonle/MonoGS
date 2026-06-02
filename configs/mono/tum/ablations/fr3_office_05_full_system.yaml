@@ -1,19 +1,24 @@
 inherit_from: "configs/mono/tum/ablations/fr3_office_03_dust3r_pointmap_scaled.yaml"
-
+Dataset:
+  num_frames: 1350
 Training:
   lifecycle:
-    enabled: True
-    newborn_grace: 5
-    stable_min_visibility: 5
-    cold_min_age: 30
-    cold_grad_threshold: 0.00001
-    cold_opacity_threshold: 0.7
+    bad_min_visibility: 0
     bad_opacity_threshold: 0.02
-    bad_min_visibility: 1
     bad_patience: 5
-    freeze_cold: True
-    prune_bad: True
+    bad_use_recent_visibility: false
+    cold_grad_threshold: 1.0e-05
+    cold_min_age: 80
+    cold_opacity_threshold: 0.5
+    enabled: True
+    freeze_cold: false
     log_interval: 10
+    newborn_grace: 10
+    protect_newborn_from_prune: false
+    prune_bad: True
+    prune_bad_local_only: True
+    stable_min_visibility: 5
+    suppress_cold_densify: false
   dust3r:
     alignment:
       enabled: True
@@ -48,15 +53,21 @@ Training:
       backproject_depth: True
       pcd_downsample: 4
       point_size_scale: 0.25
-      sample_stride: 2
-      gradient_extra_samples: True
+      sample_stride: 1
+      gradient_extra_samples: False
       gradient_threshold: 0.08
       gradient_stride: 2
       max_points: 200000
       use_pixel_footprint_scale: True
       pixel_footprint_scale: 0.75
-      use_confidence_mask: True
+      use_confidence_mask: False
       fill_invalid_depth: False
+      depth_scale:
+        enabled: True
+        mode: "median"
+        target_median: 2.0
+        min_scale: 0.25
+        max_scale: 4.0
       selection:
         candidate_pool: 6
         max_candidate_evals: 3
@@ -69,9 +80,18 @@ Training:
     optimization:
       enabled: True
       min_keyframe_gap: 3
-      mapping_iters_with_dust3r: 5
-      mapping_iters_without_dust3r: 10
+      mapping_iters_with_dust3r: 50
+      mapping_iters_without_dust3r: 80
       preinit_mapping_iters_with_dust3r: 20
       initial_ba_iters_with_dust3r: 150
       skip_densify_after_insert: 2
       min_insert_points_for_fast_mapping: 256
+  init_itr_num: 600
+  init_gaussian_update: 200
+  init_gaussian_reset: 400
+  init_gaussian_th: 0.01      
+  init_gaussian_extent: 30
+  tracking_itr_num: 60
+  mapping_itr_num: 80
+  gaussian_update_every: 300   # từ 150
+  gaussian_update_offset: 100  # từ 50

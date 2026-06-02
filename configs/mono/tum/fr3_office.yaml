@@ -3,6 +3,8 @@ inherit_from: "configs/mono/tum/base_config.yaml"
 Results:
   use_gui: False
   eval_rendering: True
+  color_refinement: False
+
 
 Training:
   lifecycle:

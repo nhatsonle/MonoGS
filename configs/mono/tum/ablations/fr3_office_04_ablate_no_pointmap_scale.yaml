@@ -1,0 +1,14 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# Ablation from config 04:
+# Keep DUSt3R depth bootstrap/refresh, but disable both DUSt3R-to-SLAM scale
+# mechanisms for multiview refreshes. Frame-0 single-view median depth
+# normalization remains enabled because it is part of the DUSt3R-depth bootstrap
+# path and there is no SLAM baseline at frame 0.
+
+Training:
+  dust3r:
+    scale:
+      baseline_ratio: False
+      pointmap_sync: False
+

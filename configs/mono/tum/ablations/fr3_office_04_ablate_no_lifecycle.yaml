@@ -1,0 +1,10 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# Ablation from config 04:
+# Keep DUSt3R depth bootstrap/refresh and pointmap scale synchronization, but
+# disable the Gaussian lifecycle controller.
+
+Training:
+  lifecycle:
+    enabled: False
+
