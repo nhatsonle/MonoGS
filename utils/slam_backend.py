@@ -106,7 +106,10 @@ class BackEnd(mp.Process):
         self.lifecycle_enabled = bool(lifecycle_config.get("enabled", False))
         self.lifecycle_prune_bad = bool(lifecycle_config.get("prune_bad", True))
         self.lifecycle_prune_bad_local_only = bool(
-            lifecycle_config.get("prune_bad_local_only", True)
+            lifecycle_config.get(
+                "local_only",
+                lifecycle_config.get("prune_bad_local_only", True),
+            )
         )
         self.lifecycle_protect_newborn_from_prune = bool(
             lifecycle_config.get("protect_newborn_from_prune", False)

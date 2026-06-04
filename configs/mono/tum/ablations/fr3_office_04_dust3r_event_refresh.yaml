@@ -81,19 +81,8 @@ Training:
     optimization:
       min_keyframe_gap: 999999
   lifecycle:
-    bad_min_visibility: 0
-    bad_opacity_threshold: 0.02
-    bad_patience: 5
-    bad_use_recent_visibility: false
-    cold_grad_threshold: 1.0e-05
-    cold_min_age: 80
-    cold_opacity_threshold: 0.5
     enabled: true
-    freeze_cold: false
+    mode: adaptive
+    aggressiveness: 0.5
+    local_only: true
     log_interval: 10
-    newborn_grace: 10
-    protect_newborn_from_prune: false
-    prune_bad: true
-    prune_bad_local_only: true
-    stable_min_visibility: 5
-    suppress_cold_densify: false

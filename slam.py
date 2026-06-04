@@ -129,6 +129,7 @@ class SLAM:
                 "lifecycle_visibility",
                 "lifecycle_recent_visibility",
                 "lifecycle_bad_count",
+                "lifecycle_bad_score",
                 "lifecycle_state",
             ]
             seen_tensors = set()

@@ -53,6 +53,7 @@ class GaussianModel:
         self.lifecycle_visibility = torch.empty(0, device="cuda").int()
         self.lifecycle_recent_visibility = torch.empty(0, device="cuda").int()
         self.lifecycle_bad_count = torch.empty(0, device="cuda").int()
+        self.lifecycle_bad_score = torch.empty(0, device="cuda")
         self.lifecycle_state = torch.empty(0, device="cuda").int()
 
         self.optimizer = None
@@ -79,6 +80,7 @@ class GaussianModel:
         self.lifecycle_visibility = torch.zeros((n_points), device="cuda").int()
         self.lifecycle_recent_visibility = torch.zeros((n_points), device="cuda").int()
         self.lifecycle_bad_count = torch.zeros((n_points), device="cuda").int()
+        self.lifecycle_bad_score = torch.zeros((n_points), device="cuda")
         self.lifecycle_state = torch.zeros((n_points), device="cuda").int()
 
     def lifecycle_enabled(self):
@@ -96,6 +98,9 @@ class GaussianModel:
             (self.lifecycle_recent_visibility, new_zeros)
         )
         self.lifecycle_bad_count = torch.cat((self.lifecycle_bad_count, new_zeros))
+        self.lifecycle_bad_score = torch.cat(
+            (self.lifecycle_bad_score, new_zeros.float())
+        )
         self.lifecycle_state = torch.cat((self.lifecycle_state, new_zeros))
 
     def update_lifecycle(self, recent_visibility):
@@ -111,10 +116,129 @@ class GaussianModel:
         self.lifecycle_recent_visibility = recent_visibility
         self.lifecycle_visibility += recent_visibility
 
-        opacity = self.get_opacity.detach().squeeze()
+        if cfg.get("mode", "manual") == "adaptive":
+            return self.update_adaptive_lifecycle(recent_visibility, cfg)
+
+        return self.update_manual_lifecycle(recent_visibility, cfg)
+
+    def lifecycle_aggressiveness(self, cfg):
+        return float(np.clip(float(cfg.get("aggressiveness", 0.5)), 0.0, 1.0))
+
+    def adaptive_lifecycle_params(self, cfg):
+        aggressiveness = self.lifecycle_aggressiveness(cfg)
+        return {
+            "aggressiveness": aggressiveness,
+            "min_age": int(round(np.interp(aggressiveness, [0.0, 1.0], [14, 4]))),
+            "bad_score_decay": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.92, 0.75])
+            ),
+            "bad_score_threshold": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.75, 0.55])
+            ),
+            "opacity_quantile": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.03, 0.12])
+            ),
+            "opacity_floor": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.005, 0.03])
+            ),
+            "target_support": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.25, 0.55])
+            ),
+            "max_bad_fraction": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.02, 0.10])
+            ),
+            "cold_grad_quantile": float(
+                np.interp(aggressiveness, [0.0, 1.0], [0.20, 0.35])
+            ),
+        }
+
+    def normalized_recent_support(self, recent_visibility):
+        max_visibility = torch.clamp(recent_visibility.max().float(), min=1.0)
+        return recent_visibility.float() / max_visibility
+
+    def opacity_reference(self, opacity, mature, params):
+        if mature.any():
+            opacity_pool = opacity[mature]
+        else:
+            opacity_pool = opacity
+        if opacity_pool.numel() == 0:
+            return torch.tensor(params["opacity_floor"], device=opacity.device)
+        quantile = torch.quantile(opacity_pool, params["opacity_quantile"])
+        floor = torch.tensor(params["opacity_floor"], device=opacity.device)
+        return torch.clamp(quantile, min=floor)
+
+    def lifecycle_grad_norm(self):
         grads = self.xyz_gradient_accum / torch.clamp_min(self.denom, 1.0)
         grads[grads.isnan()] = 0.0
-        grad_norm = torch.norm(grads, dim=-1)
+        return torch.norm(grads, dim=-1)
+
+    def update_adaptive_lifecycle(self, recent_visibility, cfg):
+        params = self.adaptive_lifecycle_params(cfg)
+
+        opacity = self.get_opacity.detach().reshape(-1)
+        grad_norm = self.lifecycle_grad_norm()
+        mature = self.lifecycle_age >= params["min_age"]
+        support = self.normalized_recent_support(recent_visibility)
+        opacity_ref = self.opacity_reference(opacity, mature, params)
+        low_opacity = torch.clamp((opacity_ref - opacity) / opacity_ref, 0.0, 1.0)
+        low_support = torch.clamp(
+            (params["target_support"] - support) / max(params["target_support"], 1e-6),
+            0.0,
+            1.0,
+        )
+
+        quality_loss = low_opacity * (0.75 + 0.25 * low_support)
+        decay = params["bad_score_decay"]
+        self.lifecycle_bad_score = (
+            decay * self.lifecycle_bad_score + (1.0 - decay) * quality_loss
+        )
+        self.lifecycle_bad_score = torch.where(
+            mature, self.lifecycle_bad_score, torch.zeros_like(self.lifecycle_bad_score)
+        )
+
+        bad = mature & (self.lifecycle_bad_score >= params["bad_score_threshold"])
+        if bad.any():
+            max_bad = max(1, int(round(params["max_bad_fraction"] * bad.numel())))
+            bad_indices = torch.nonzero(bad, as_tuple=False).squeeze(-1)
+            if bad_indices.numel() > max_bad:
+                scores = self.lifecycle_bad_score[bad_indices]
+                keep = torch.topk(scores, max_bad, largest=True).indices
+                capped_bad = torch.zeros_like(bad)
+                capped_bad[bad_indices[keep]] = True
+                bad = capped_bad
+
+        good_support = support >= params["target_support"]
+        good_opacity = opacity >= opacity_ref
+        if mature.any():
+            grad_pool = grad_norm[mature]
+        else:
+            grad_pool = grad_norm
+        if grad_pool.numel() > 0:
+            cold_grad_threshold = torch.quantile(
+                grad_pool, params["cold_grad_quantile"]
+            )
+        else:
+            cold_grad_threshold = torch.tensor(0.0, device=grad_norm.device)
+        cold = mature & good_support & good_opacity & (grad_norm <= cold_grad_threshold)
+        cold = cold & ~bad
+        stable = mature & ~cold & ~bad
+
+        self.lifecycle_bad_count = torch.where(
+            self.lifecycle_bad_score >= params["bad_score_threshold"],
+            self.lifecycle_bad_count + 1,
+            torch.zeros_like(self.lifecycle_bad_count),
+        )
+
+        state = torch.zeros_like(self.lifecycle_state)
+        state[stable] = 1
+        state[cold] = 2
+        state[bad] = 3
+        self.lifecycle_state = state
+        return self.lifecycle_counts()
+
+    def update_manual_lifecycle(self, recent_visibility, cfg):
+        opacity = self.get_opacity.detach().reshape(-1)
+        grad_norm = self.lifecycle_grad_norm()
 
         newborn_grace = int(cfg.get("newborn_grace", 3))
         stable_min_visibility = int(cfg.get("stable_min_visibility", 3))
@@ -166,6 +290,22 @@ class GaussianModel:
         self.lifecycle_state = state
         return self.lifecycle_counts()
 
+    def lifecycle_densify_suppression_mask(self):
+        if not self.lifecycle_enabled() or self.lifecycle_state.shape[0] == 0:
+            return None
+        cfg = self.config["Training"].get("lifecycle", {})
+        if self.lifecycle_state.shape[0] != self.get_xyz.shape[0]:
+            return None
+        if cfg.get("mode", "manual") == "adaptive":
+            params = self.adaptive_lifecycle_params(cfg)
+            suspected_bad = self.lifecycle_bad_score >= (
+                0.5 * params["bad_score_threshold"]
+            )
+            return torch.logical_or(self.lifecycle_state == 2, suspected_bad)
+        if bool(cfg.get("suppress_cold_densify", False)):
+            return self.lifecycle_state == 2
+        return None
+
     def lifecycle_counts(self):
         if self.lifecycle_state.shape[0] == 0:
             return {"newborn": 0, "stable": 0, "cold": 0, "bad": 0}
@@ -189,6 +329,8 @@ class GaussianModel:
     def freeze_cold_gradients(self):
         cold_mask = self.cold_mask()
         cfg = self.config["Training"].get("lifecycle", {})
+        if cfg.get("mode", "manual") == "adaptive":
+            return
         if cold_mask is None or not bool(cfg.get("freeze_cold", True)):
             return
         if not cold_mask.any():
@@ -1069,6 +1211,7 @@ class GaussianModel:
                 valid_points_mask
             ]
             self.lifecycle_bad_count = self.lifecycle_bad_count[valid_points_mask]
+            self.lifecycle_bad_score = self.lifecycle_bad_score[valid_points_mask]
             self.lifecycle_state = self.lifecycle_state[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -1227,16 +1370,9 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         lifecycle_config = self.config["Training"].get("lifecycle", {})
-        suppress_cold_densify = bool(
-            lifecycle_config.get("suppress_cold_densify", False)
-        )
-        if (
-            suppress_cold_densify
-            and self.lifecycle_enabled()
-            and self.lifecycle_state.shape[0] == grads.shape[0]
-        ):
-            cold = self.lifecycle_state == 2
-            grads[cold] = 0.0
+        suppress_densify = self.lifecycle_densify_suppression_mask()
+        if suppress_densify is not None and suppress_densify.shape[0] == grads.shape[0]:
+            grads[suppress_densify] = 0.0
 
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)

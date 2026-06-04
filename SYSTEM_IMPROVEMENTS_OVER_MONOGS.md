@@ -175,47 +175,47 @@ Relevant files:
 
 ## 3. Online Gaussian Lifecycle Controller
 
-Config 04 enables a conservative lifecycle controller for Gaussians:
+Config 04 enables an adaptive lifecycle controller for Gaussians:
 
 ```yaml
 Training:
   lifecycle:
-    enabled: True
-    newborn_grace: 10
-    stable_min_visibility: 5
-    cold_min_age: 80
-    cold_grad_threshold: 0.00001
-    cold_opacity_threshold: 0.5
-    bad_opacity_threshold: 0.02
-    bad_min_visibility: 0
-    bad_use_recent_visibility: False
-    bad_patience: 5
-    freeze_cold: False
-    suppress_cold_densify: False
-    prune_bad: True
-    prune_bad_local_only: True
-    protect_newborn_from_prune: False
+    enabled: true
+    mode: adaptive
+    aggressiveness: 0.5
+    local_only: true
     log_interval: 10
 ```
 
-The controller tracks four states:
+The controller tracks four states, but derives the internal thresholds from one
+high-level parameter, `aggressiveness`:
 
-- `newborn`: recently inserted Gaussians inside the grace period
-- `stable`: visible Gaussians that remain normally trainable
-- `cold`: old, visible, low-gradient Gaussians
-- `bad`: persistently low-opacity Gaussians after the grace period
+- `newborn`: recently inserted Gaussians that are too young to judge
+- `stable`: mature Gaussians without strong bad evidence
+- `cold`: mature, supported, low-gradient Gaussians that appear converged
+- `bad`: mature Gaussians with persistent low map evidence
 
-The current config is intentionally conservative:
+Adaptive mode computes an EMA bad score from local rendering evidence:
 
-- cold Gaussians are not frozen
-- cold Gaussians are not blocked from densification
-- newborn Gaussians are not protected from MonoGS' normal opacity pruning
-- bad pruning is restricted to MonoGS' local prune scope
-- recent invisibility alone does not make an old Gaussian bad
+```text
+bad_score_ema <- decay * bad_score_ema + (1 - decay) * quality_loss
+```
 
-This avoids the previous failure mode where valid old map Gaussians were pruned
-after the camera turned away from them, which could later distort the trajectory
-and move earlier good poses during backend optimization.
+`quality_loss` combines low opacity relative to the current opacity
+distribution, weak local-window support, and Gaussian maturity. Low visibility
+alone is not enough to mark an old Gaussian bad; it only matters when the
+Gaussian also has weak opacity evidence.
+
+The controller modifies MonoGS' original map management in two conservative
+ways:
+
+- `bad` Gaussians can be added to MonoGS' local prune mask.
+- `cold` or suspected-bad Gaussians are prevented from spawning extra
+  clone/split children during densification.
+
+Pruning remains restricted to MonoGS' local prune scope when `local_only: true`,
+which avoids deleting old valid map regions merely because the camera has turned
+away from them.
 
 Expected log:
 
@@ -280,7 +280,7 @@ For config 04, the real improvements over baseline MonoGS are:
 - DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth.
 - DUSt3R is reused only when the map evidence loss requests multiview refresh.
 - Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
-- The lifecycle controller conservatively prunes persistently low-opacity local
-  bad Gaussians and logs Gaussian states.
+- The adaptive lifecycle controller uses one aggressiveness setting to prune
+  persistent low-evidence local Gaussians and suppress redundant densification.
 - Extra final logs report Gaussian count, model memory, optimizer memory, and
   CUDA memory for evaluation.

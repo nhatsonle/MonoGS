@@ -355,8 +355,9 @@ duoc loai bo hop ly, map co the phinh to, lam tang model size va chi phi render.
 
 Tuy nhien, neu prune qua manh, he thong co the xoa cac Gaussian cu nhung van
 can thiet cho loop hoac cho cac view ve sau. Dieu nay co the lam map mat on
-dinh va gay drift. Vi vay lifecycle controller trong config 04 duoc dat o che
-do bao thu.
+dinh va gay drift. Vi vay lifecycle controller trong config 04 khong thay the
+pruning/densification goc cua MonoGS, ma dieu bien chung bang mot quality score
+thich nghi.
 
 ### 7.2. Trang Thai Gaussian
 
@@ -366,31 +367,21 @@ Moi Gaussian duoc gan mot trong bon trang thai:
 newborn -> stable / cold / bad
 ```
 
-- `newborn`: Gaussian moi duoc them vao, van trong grace period.
-- `stable`: Gaussian da qua grace period va co tong visibility du lon.
-- `cold`: Gaussian cu, van nhin thay gan day, opacity du cao, nhung gradient
-  vi tri thap. Dieu nay goi y Gaussian da hoi tu.
-- `bad`: Gaussian co opacity thap lien tiep sau grace period.
+- `newborn`: Gaussian moi duoc them vao, chua du tuoi de danh gia.
+- `stable`: Gaussian da du tuoi va chua co bang chung xau.
+- `cold`: Gaussian co opacity/support tot nhung gradient thap, goi y da hoi tu.
+- `bad`: Gaussian co bad-score cao keo dai, thuong la opacity thap va support
+  yeu trong local window.
 
 Config 04:
 
 ```yaml
 lifecycle:
-  enabled: True
-  newborn_grace: 10
-  stable_min_visibility: 5
-  cold_min_age: 80
-  cold_grad_threshold: 0.00001
-  cold_opacity_threshold: 0.5
-  bad_opacity_threshold: 0.02
-  bad_min_visibility: 0
-  bad_use_recent_visibility: False
-  bad_patience: 5
-  freeze_cold: False
-  suppress_cold_densify: False
-  prune_bad: True
-  prune_bad_local_only: True
-  protect_newborn_from_prune: False
+  enabled: true
+  mode: adaptive
+  aggressiveness: 0.5
+  local_only: true
+  log_interval: 10
 ```
 
 ### 7.3. Quy Tac Cap Nhat
@@ -403,29 +394,41 @@ Tai cac buoc mapping/pruning, he thong cap nhat:
 - `opacity`: opacity hien tai;
 - `grad_norm`: norm cua gradient vi tri trung binh.
 
-Gaussian duoc xem la bad candidate neu:
+Trong adaptive mode, cac nguong noi bo khong can dat bang tay. He thong noi suy
+chung tu mot tham so duy nhat `aggressiveness`:
 
 ```text
-age > newborn_grace
-opacity < bad_opacity_threshold
+aggressiveness thap  -> bao thu hon, prune cham hon
+aggressiveness cao   -> manh tay hon, prune nhanh hon
 ```
 
-Neu dieu kien nay lap lai du `bad_patience` lan, Gaussian duoc gan nhan `bad`.
-Trong config 04, low recent visibility khong lam Gaussian thanh bad, vi mot
-diem map cu co the tam thoi khong nam trong view hien tai nhung van hop le.
-
-Gaussian duoc xem la cold neu:
+Moi lifecycle update tinh mot bad-score:
 
 ```text
-age >= cold_min_age
-recent_visibility >= stable_min_visibility
-opacity >= cold_opacity_threshold
-grad_norm < cold_grad_threshold
-not bad
+bad_score_ema <- decay * bad_score_ema + (1 - decay) * quality_loss
 ```
 
-Tuy nhien, trong config 04, cold Gaussian khong bi freeze va cung khong bi chan
-densification. Trang thai cold chu yeu duoc ghi log va phuc vu phan tich.
+`quality_loss` duoc tinh tu:
+
+- opacity thap so voi quantile opacity hien tai cua map;
+- support thap trong local keyframe window;
+- maturity/age, de Gaussian moi khong bi danh gia qua som.
+
+Quan trong la visibility thap khong tu dong lam Gaussian thanh bad. Visibility
+chi lam tang score khi Gaussian dong thoi co opacity yeu. Nhu vay cac Gaussian
+cu dang tam thoi nam ngoai view, nhung van co opacity tot, se khong bi prune
+chi vi camera quay di.
+
+Adaptive mode cung tu suy ra cold Gaussian:
+
+```text
+cold = mature and good opacity/support and low position gradient
+```
+
+Cold Gaussian khong bi freeze trong adaptive mode. Thay vao do, no duoc dung de
+chan densification thua: cac Gaussian da hoi tu hoac dang co bad-score cao se
+khong duoc clone/split them nua. Dieu nay giup giam Gaussian thua ma khong lam
+mat co che densify theo gradient cua MonoGS.
 
 ### 7.4. Pruning An Toan
 
@@ -433,22 +436,16 @@ densification. Trang thai cold chu yeu duoc ghi log va phuc vu phan tich.
 local prune scope cua MonoGS:
 
 ```yaml
-prune_bad_local_only: True
+local_only: true
 ```
 
 Dieu nay ngan lifecycle controller xoa cac Gaussian o xa chi vi chung khong
 xuat hien trong local window hien tai. Day la diem quan trong de tranh lam lech
 lai cac frame dau da tracking tot khi backend toi uu map va pose.
 
-Config 04 cung giu:
-
-```yaml
-protect_newborn_from_prune: False
-```
-
-Tuc la newborn Gaussian van co the bi MonoGS opacity pruning binh thuong neu
-chat luong kem. Dieu nay tranh truong hop Gaussian moi duoc bao ve qua muc va
-lam map tang kich thuoc khong can thiet.
+Adaptive controller cung gioi han ti le Gaussian co the bi gan bad trong moi
+lan update. Ti le nay duoc suy ra tu `aggressiveness`, nen controller khong the
+dot ngot xoa qua nhieu Gaussian trong mot buoc prune.
 
 ## 8. Luong Xu Ly Online Cua Config 04
 
@@ -501,11 +498,9 @@ DUSt3R:
   baseline_ratio: True
 
 Lifecycle:
-  newborn_grace: 10
-  cold_min_age: 80
-  bad_opacity_threshold: 0.02
-  bad_patience: 5
-  prune_bad_local_only: True
+  mode: adaptive
+  aggressiveness: 0.5
+  local_only: True
 ```
 
 Cac metric nen dung de danh gia:
