@@ -331,12 +331,12 @@ class MonocularDataset(BaseDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
         calibration = config["Dataset"]["Calibration"]
-        full_fx = calibration["fx"]
-        full_fy = calibration["fy"]
-        full_cx = calibration["cx"]
-        full_cy = calibration["cy"]
-        self.full_width = calibration["width"]
-        self.full_height = calibration["height"]
+        full_fx = float(calibration["fx"])
+        full_fy = float(calibration["fy"])
+        full_cx = float(calibration["cx"])
+        full_cy = float(calibration["cy"])
+        self.full_width = int(calibration["width"])
+        self.full_height = int(calibration["height"])
         self.downscale = max(1, int(config["Dataset"].get("downscale", 1)))
         self.fx = full_fx / self.downscale
         self.fy = full_fy / self.downscale
@@ -346,26 +346,29 @@ class MonocularDataset(BaseDataset):
         self.height = self.full_height // self.downscale
         self.fovx = focal2fov(self.fx, self.width)
         self.fovy = focal2fov(self.fy, self.height)
-        self.K = np.array(
-            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]]
+        self.K = np.asarray(
+            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
         )
         # distortion parameters
         self.disorted = calibration["distorted"]
-        self.dist_coeffs = np.array(
+        self.dist_coeffs = np.asarray(
             [
-                calibration["k1"],
-                calibration["k2"],
-                calibration["p1"],
-                calibration["p2"],
-                calibration["k3"],
-            ]
+                float(calibration["k1"]),
+                float(calibration["k2"]),
+                float(calibration["p1"]),
+                float(calibration["p2"]),
+                float(calibration["k3"]),
+            ],
+            dtype=np.float64,
         )
-        full_K = np.array(
+        full_K = np.asarray(
             [
                 [full_fx, 0.0, full_cx],
                 [0.0, full_fy, full_cy],
                 [0.0, 0.0, 1.0],
-            ]
+            ],
+            dtype=np.float64,
         )
         self.map1x, self.map1y = cv2.initUndistortRectifyMap(
             full_K,
