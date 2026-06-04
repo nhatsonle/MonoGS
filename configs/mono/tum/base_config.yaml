@@ -30,13 +30,16 @@ Training:
   tracking_loss: l1
   tracking_huber_delta: 0.1
   # Camera-tracking pose optimizer.
-  #   adam  : 1st-order, MonoGS default (up to tracking_itr_num render steps)
-  #   lbfgs : 2nd-order quasi-Newton; converges in far fewer render steps.
-  #           Use with tracking_loss: huber (Gauss-Newton compatible residual).
+  #   adam : 1st-order, MonoGS default (up to tracking_itr_num render steps)
+  #   lm   : 2nd-order damped diagonal Levenberg-Marquardt on the SE(3) delta;
+  #          curvature-aware stride + trust-region lambda, ~1 render/iter, aims
+  #          to converge in fewer iters. Pair with tracking_loss: huber.
   tracking_optimizer: adam
-  tracking_lbfgs_inner_iter: 5   # L-BFGS evals per outer (re-linearization) step
-  tracking_lbfgs_outer_iter: 6   # number of re-linearization steps
-  tracking_lbfgs_lr: 1.0
+  tracking_lm_itr_num: 30        # max LM iterations (vs tracking_itr_num for adam)
+  tracking_lm_lambda_init: 1.0   # initial damping (trust-region)
+  tracking_lm_lambda_min: 0.0001
+  tracking_lm_lambda_max: 10000.0
+  tracking_lm_converged: 0.0001  # stop when SE(3) step norm < this
   gaussian_update_every: 150
   gaussian_update_offset: 50
   gaussian_th: 0.7

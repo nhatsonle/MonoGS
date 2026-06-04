@@ -1,0 +1,10 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# 2nd-order camera tracking: hand-rolled damped diagonal Levenberg-Marquardt on
+# the SE(3) pose delta, using the robust Huber tracking residual. Aims to match
+# Adam's accuracy in fewer render iterations.
+Training:
+  tracking_loss: huber
+  tracking_huber_delta: 0.1
+  tracking_optimizer: lm
+  tracking_lm_itr_num: 30

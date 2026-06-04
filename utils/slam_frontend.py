@@ -1250,85 +1250,135 @@ class FrontEnd(mp.Process):
                 break
         return render_pkg, tracking_loss_value
 
-    def _tracking_lbfgs(self, viewpoint, opt_params):
-        # 2nd-order tracking via L-BFGS: the curvature of the 6-DoF pose is
-        # approximated from the history of grad_tau, so each outer step takes a
-        # near-Newton stride instead of a small gradient step. A strong-Wolfe
-        # line search keeps it stable on the robust (Huber) tracking residual.
+    def _render_track(self, viewpoint):
+        """Render at the current pose (delta = 0) and return (loss, render_pkg).
+
+        The rasterizer's forward pass ignores theta/rho; the SE(3) delta only
+        enters the backward pass to produce grad_tau, the gradient of the loss
+        w.r.t. the pose at the current linearization point. So every step must
+        bake the chosen delta into R/T and re-render to re-linearize.
+        """
+        render_pkg = render(
+            viewpoint, self.gaussians, self.pipeline_params, self.background
+        )
+        loss_tracking = get_loss_tracking(
+            self.config,
+            render_pkg["render"],
+            render_pkg["depth"],
+            render_pkg["opacity"],
+            viewpoint,
+        )
+        return loss_tracking, render_pkg
+
+    def _tracking_lm(self, viewpoint, opt_params):
+        # 2nd-order tracking via a hand-rolled Levenberg-Marquardt loop, the
+        # only Newton-style scheme compatible with this rasterizer (forward is
+        # constant in the delta, so optimizers that re-evaluate the loss at a
+        # perturbed delta cannot be used).
         #
-        # The SE(3) delta must NOT be baked into R/T while L-BFGS is still
-        # probing within one step() (its line search evaluates the closure
-        # several times and relies on the delta accumulating). We therefore
-        # bake + reset the delta with update_pose() only AFTER each step()
-        # completes, then re-linearize for the next outer iteration.
-        params = [g["params"][0] for g in opt_params]
-        lr = float(self.config["Training"].get("tracking_lbfgs_lr", 1.0))
-        inner_iter = int(self.config["Training"].get("tracking_lbfgs_inner_iter", 5))
-        # Outer iterations re-bake the delta into R/T (re-linearization point).
-        outer_iter = int(
-            self.config["Training"].get(
-                "tracking_lbfgs_outer_iter",
-                max(1, self.tracking_itr_num // inner_iter),
-            )
+        # Each iteration:
+        #   1. render at delta=0, backward -> g = grad of loss w.r.t. the 6-DoF
+        #      SE(3) delta (grad_tau), split into trans/rot.
+        #   2. damped diagonal step  d = -g / (diag * (1 + lambda)). The per-DoF
+        #      diagonal scale uses the original MonoGS learning rates, which
+        #      already encode the very different sensitivity of rotation vs
+        #      translation. This is a diagonal-LM, cheap (1 render/iter) yet
+        #      taking a much larger, curvature-aware stride than plain Adam.
+        #   3. write d into the delta, bake into R/T via update_pose(), re-render.
+        #   4. accept if the loss decreased (shrink lambda) else roll back the
+        #      pose and grow lambda (classic LM trust-region control).
+        lr_rot = float(self.config["Training"]["lr"]["cam_rot_delta"])
+        lr_trans = float(self.config["Training"]["lr"]["cam_trans_delta"])
+        lam = float(self.config["Training"].get("tracking_lm_lambda_init", 1.0))
+        lam_min = float(self.config["Training"].get("tracking_lm_lambda_min", 1e-4))
+        lam_max = float(self.config["Training"].get("tracking_lm_lambda_max", 1e4))
+        max_itr = int(
+            self.config["Training"].get("tracking_lm_itr_num", self.tracking_itr_num)
+        )
+        converged_threshold = float(
+            self.config["Training"].get("tracking_lm_converged", 1e-4)
         )
 
-        last = {"loss": None, "render_pkg": None}
+        loss_tracking, render_pkg = self._render_track(viewpoint)
+        cur_loss = float(loss_tracking.detach().item())
 
-        def closure():
-            pose_optimizer.zero_grad()
-            render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
-            )
-            image, depth, opacity = (
-                render_pkg["render"],
-                render_pkg["depth"],
-                render_pkg["opacity"],
-            )
-            loss_tracking = get_loss_tracking(
-                self.config, image, depth, opacity, viewpoint
-            )
+        for tracking_itr in range(max_itr):
+            # Fresh gradient at the current linearization point.
+            for p in (
+                viewpoint.cam_rot_delta,
+                viewpoint.cam_trans_delta,
+                viewpoint.exposure_a,
+                viewpoint.exposure_b,
+            ):
+                if p.grad is not None:
+                    p.grad.detach_()
+                    p.grad.zero_()
+            loss_tracking, render_pkg = self._render_track(viewpoint)
+            cur_loss = float(loss_tracking.detach().item())
             loss_tracking.backward()
-            last["loss"] = float(loss_tracking.detach().item())
-            last["render_pkg"] = render_pkg
-            return loss_tracking
 
-        tracking_loss_value = None
-        render_pkg = None
-        for outer in range(outer_iter):
-            pose_optimizer = torch.optim.LBFGS(
-                params,
-                lr=lr,
-                max_iter=inner_iter,
-                line_search_fn="strong_wolfe",
-            )
-            pose_optimizer.step(closure)
-            tracking_loss_value = last["loss"]
-            render_pkg = last["render_pkg"]
-
-            with torch.no_grad():
-                converged = update_pose(viewpoint)
-
-            self._push_tracking_gui(viewpoint)
-            if converged:
+            g_rot = viewpoint.cam_rot_delta.grad
+            g_trans = viewpoint.cam_trans_delta.grad
+            if g_rot is None or g_trans is None:
                 break
 
-        # Guarantee a render_pkg even if outer_iter somehow ran zero times.
-        if render_pkg is None:
-            render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
-            )
-            tracking_loss_value = float(
-                get_loss_tracking(
-                    self.config,
-                    render_pkg["render"],
-                    render_pkg["depth"],
-                    render_pkg["opacity"],
-                    viewpoint,
-                )
-                .detach()
-                .item()
-            )
-        return render_pkg, tracking_loss_value
+            # Save pose so a rejected LM step can be undone.
+            R_backup = viewpoint.R.clone()
+            T_backup = viewpoint.T.clone()
+            exp_a_backup = viewpoint.exposure_a.detach().clone()
+            exp_b_backup = viewpoint.exposure_b.detach().clone()
+
+            with torch.no_grad():
+                # Damped diagonal Levenberg step (note: delta currently 0, so the
+                # step IS the new delta value to bake).
+                d_rot = -g_rot / (lr_rot ** -1 * (1.0 + lam))
+                d_trans = -g_trans / (lr_trans ** -1 * (1.0 + lam))
+                viewpoint.cam_rot_delta.copy_(d_rot)
+                viewpoint.cam_trans_delta.copy_(d_trans)
+
+                step_norm = torch.cat(
+                    [d_trans.reshape(-1), d_rot.reshape(-1)]
+                ).norm()
+
+                # Exposure is a plain (non-SE3) parameter: simple damped step.
+                if viewpoint.exposure_a.grad is not None:
+                    viewpoint.exposure_a -= viewpoint.exposure_a.grad * 0.01 / (
+                        1.0 + lam
+                    )
+                if viewpoint.exposure_b.grad is not None:
+                    viewpoint.exposure_b -= viewpoint.exposure_b.grad * 0.01 / (
+                        1.0 + lam
+                    )
+
+                # Bake delta -> R/T and reset delta to 0 (update_pose does both).
+                update_pose(viewpoint)
+
+            # Evaluate the trial pose.
+            with torch.no_grad():
+                trial_loss_t, trial_pkg = self._render_track(viewpoint)
+                trial_loss = float(trial_loss_t.detach().item())
+
+            if trial_loss < cur_loss:
+                # Accept: keep new pose, trust the model more next time.
+                cur_loss = trial_loss
+                render_pkg = trial_pkg
+                lam = max(lam_min, lam * 0.5)
+            else:
+                # Reject: roll back pose/exposure, distrust the model more.
+                with torch.no_grad():
+                    viewpoint.update_RT(R_backup, T_backup)
+                    viewpoint.exposure_a.copy_(exp_a_backup)
+                    viewpoint.exposure_b.copy_(exp_b_backup)
+                    viewpoint.cam_rot_delta.zero_()
+                    viewpoint.cam_trans_delta.zero_()
+                lam = min(lam_max, lam * 2.0)
+
+            if tracking_itr % 10 == 0:
+                self._push_tracking_gui(viewpoint)
+            if step_norm < converged_threshold:
+                break
+
+        return render_pkg, cur_loss
 
     def tracking(self, cur_frame_idx, viewpoint):
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
@@ -1373,8 +1423,8 @@ class FrontEnd(mp.Process):
             }
         )
 
-        if self.tracking_optimizer == "lbfgs":
-            render_pkg, tracking_loss_value = self._tracking_lbfgs(
+        if self.tracking_optimizer == "lm":
+            render_pkg, tracking_loss_value = self._tracking_lm(
                 viewpoint, opt_params
             )
         else:
