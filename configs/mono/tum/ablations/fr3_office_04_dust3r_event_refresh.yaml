@@ -71,6 +71,13 @@ Training:
       min_visible_gaussian_ratio: 0.01
       ema_decay: 0.95
       max_calls: 3
+      loss:
+        threshold: 1.0
+        photometric_weight: 1.0
+        opacity_weight: 2.0
+        visibility_weight: 2.0
+        geometry_weight: 1.0
+        bootstrap_weight: 1.0
     optimization:
       min_keyframe_gap: 999999
   lifecycle:

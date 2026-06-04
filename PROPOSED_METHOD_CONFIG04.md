@@ -149,45 +149,68 @@ chuyen sang SH DC feature.
 Ket qua la frame 0 co Gaussian map ngay tu dau, dam bao tracking co ban do de
 render tu frame dau tien.
 
-## 4. Event-Triggered DUSt3R Multiview Depth Refresh
+## 4. Map Evidence DUSt3R Multiview Depth Refresh
 
 ### 4.1. Ly Do Khong Goi DUSt3R Moi Keyframe
 
 DUSt3R inference co chi phi lon, thuong gan 1 giay cho moi lan goi voi model
 lon. Neu goi DUSt3R o moi keyframe, FPS tong the se giam manh va khong phu hop
 muc tieu real-time SLAM. Vi vay config 04 chi dung DUSt3R nhu mot module refresh
-hinh hoc theo su kien.
+hinh hoc duoc dieu khien boi mot ham loss duy nhat.
 
 Sau khi da bootstrap frame 0, MonoGS tiep tuc tracking va mapping nhu binh
-thuong. DUSt3R chi duoc goi lai khi frontend phat hien map hien tai co dau hieu
-khong con phu hop voi view hien tai.
+thuong. DUSt3R chi duoc goi lai khi Gaussian map hien tai khong con giai thich
+du frame moi theo map evidence loss.
 
-### 4.2. Cac Tin Hieu Kich Hoat Refresh
+### 4.2. Map Evidence Loss
 
-Frontend tinh cac chi so map-health tu render hien tai:
-
-- opacity coverage: ty le pixel co opacity du lon;
-- visible Gaussian ratio: ty le Gaussian duoc nhin thay trong frame hien tai;
-- tracking loss ratio: tracking loss hien tai so voi EMA cua tracking loss;
-- depth ratio: thay doi median rendered depth so voi lan refresh truoc.
-
-Mot refresh DUSt3R co the duoc kich hoat khi:
+Frontend khong dung cac su kien kich hoat doc lap. Thay vao do, he thong tinh
+mot dai luong duy nhat:
 
 ```text
-opacity_coverage < min_opacity_coverage
-visible_ratio < min_visible_gaussian_ratio
-loss_ratio > max_tracking_loss_ratio
-depth_ratio > max_depth_change_ratio
+L_refresh =
+    w_photo * L_photo
+  + w_opacity * L_opacity
+  + w_visibility * L_visibility
+  + w_geometry * L_geometry
+  + w_bootstrap * L_bootstrap
 ```
 
-Config 04 cung ep mot lan refresh multiview som sau bootstrap:
+Trong do cac thanh phan deu la proxy cho muc do observation hien tai khong duoc
+Gaussian map giai thich tot:
+
+- `L_photo`: tracking loss tang so voi EMA cua tracking loss;
+- `L_opacity`: render hien tai thieu opacity support;
+- `L_visibility`: qua it Gaussian duoc nhin thay trong frame hien tai;
+- `L_geometry`: phan phoi rendered depth thay doi manh so voi lan refresh truoc;
+- `L_bootstrap`: do bat dinh sau single-view bootstrap truoc khi co refresh
+  multiview dau tien.
+
+DUSt3R duoc goi khi:
+
+```text
+L_refresh >= threshold
+```
+
+Nhung nguong nhu `max_tracking_loss_ratio`, `min_opacity_coverage`,
+`min_visible_gaussian_ratio` va `max_depth_change_ratio` khong con la cac event
+doc lap. Chung duoc dung lam thang chuan hoa cho cac thanh phan loss. Config 04
+dung:
 
 ```yaml
-force_after_bootstrap: True
+refresh:
+  loss:
+    threshold: 1.0
+    photometric_weight: 1.0
+    opacity_weight: 2.0
+    visibility_weight: 2.0
+    geometry_weight: 1.0
+    bootstrap_weight: 1.0
 ```
 
-Dieu nay giup frame dau tien co single-view depth, sau do map som duoc bo sung
-boi multiview depth chat luong tot hon khi da co them frame/reference phu hop.
+Vi `L_bootstrap` la mot thanh phan cua loss, lan refresh multiview som sau
+bootstrap khong con la mot su kien rieng. No la ket qua cua uncertainty cao sau
+khi map moi chi duoc khoi tao tu single-view DUSt3R depth.
 
 ### 4.3. Gioi Han Tan Suat Goi DUSt3R
 
@@ -444,12 +467,12 @@ For each new frame t
   -> du doan pose tu frame truoc/constant velocity
   -> render Gaussian map
   -> toi uu pose bang RGB tracking loss
-  -> tinh map-health
+  -> tinh map evidence loss
   -> neu la keyframe:
        them vao local window
        backend local mapping + BA
        lifecycle update va safe pruning
-  -> neu map-health kich hoat refresh:
+  -> neu map evidence loss vuot nguong refresh:
        chon reference keyframe hop le
        DUSt3R(frame_t, frame_ref)
        pointmap scale synchronization
@@ -503,7 +526,7 @@ So voi MonoGS monocular baseline, config 04 thay doi cac diem sau:
 | --- | --- | --- |
 | Khoi tao depth | pseudo-depth gan 2 m | DUSt3R single-view depth |
 | Frame dau | backproject pseudo-depth | backproject DUSt3R depth |
-| Refresh hinh hoc | khong co | event-triggered DUSt3R multiview depth |
+| Refresh hinh hoc | khong co | map-evidence DUSt3R multiview depth |
 | Dong bo scale | khong ap dung | baseline-ratio + pointmap sync |
 | Tracking | RGB photometric tracking | giu nguyen RGB photometric tracking |
 | Mapping | RGB local mapping/BA | giu nguyen RGB local mapping/BA |
@@ -520,7 +543,7 @@ Mot so han che can neu ro:
 
 - Single-view DUSt3R depth van can scale normalization ban dau.
 - DUSt3R inference ton chi phi lon, nen khong phu hop goi moi keyframe.
-- Event refresh phu thuoc vao nguong map-health; neu nguong qua bao thu, he
+- Map evidence refresh phu thuoc vao nguong loss; neu nguong qua bao thu, he
   thong co the khong refresh khi can; neu qua nhay, FPS se giam.
 - Lifecycle controller duoc dat bao thu de tranh drift, vi vay muc giam so
   Gaussian/model size co the khong manh neu khong tang pruning.
@@ -531,8 +554,9 @@ Phuong phap config 04 co the duoc tom tat thanh ba dong gop chinh:
 
 1. Thay pseudo-depth monocular bang DUSt3R-derived depth cho khoi tao Gaussian
    ngay tu frame dau tien.
-2. De xuat co che event-triggered DUSt3R multiview depth refresh, giup bo sung
-   hinh hoc khi map co dau hieu yeu ma khong can goi DUSt3R lien tuc.
+2. De xuat co che map-evidence DUSt3R multiview depth refresh, giup bo sung
+   hinh hoc khi map khong con giai thich tot frame moi ma khong can goi DUSt3R
+   lien tuc.
 3. Dong bo scale cua DUSt3R pointmap voi SLAM map va quan ly Gaussian bang
    lifecycle controller bao thu de kiem soat chat luong map.
 

@@ -105,6 +105,12 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_min_visible_gaussian_ratio = 0.01
         self.dust3r_refresh_ema_decay = 0.90
         self.dust3r_refresh_max_calls = 0
+        self.dust3r_refresh_loss_threshold = 1.0
+        self.dust3r_refresh_photo_weight = 1.0
+        self.dust3r_refresh_opacity_weight = 1.0
+        self.dust3r_refresh_visibility_weight = 1.0
+        self.dust3r_refresh_geometry_weight = 1.0
+        self.dust3r_refresh_bootstrap_weight = 1.0
         self.last_dust3r_refresh_frame = -1
         self.last_dust3r_refresh_kf_count = -1
         self.dust3r_refresh_call_count = 0
@@ -274,6 +280,25 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
         self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
+        refresh_loss = dust3r_refresh.get("loss", {})
+        self.dust3r_refresh_loss_threshold = float(
+            refresh_loss.get("threshold", 1.0)
+        )
+        self.dust3r_refresh_photo_weight = float(
+            refresh_loss.get("photometric_weight", 1.0)
+        )
+        self.dust3r_refresh_opacity_weight = float(
+            refresh_loss.get("opacity_weight", 1.0)
+        )
+        self.dust3r_refresh_visibility_weight = float(
+            refresh_loss.get("visibility_weight", 1.0)
+        )
+        self.dust3r_refresh_geometry_weight = float(
+            refresh_loss.get("geometry_weight", 1.0)
+        )
+        self.dust3r_refresh_bootstrap_weight = float(
+            refresh_loss.get("bootstrap_weight", 1.0)
+        )
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -808,6 +833,29 @@ class FrontEnd(mp.Process):
                 self.last_dust3r_refresh_depth / median_depth,
             )
 
+        photo_norm = max(self.dust3r_refresh_max_tracking_loss_ratio - 1.0, 1e-6)
+        photo_loss = max(0.0, loss_ratio - 1.0) / photo_norm
+        opacity_loss = max(
+            0.0,
+            self.dust3r_refresh_min_opacity_coverage - opacity_coverage,
+        ) / max(self.dust3r_refresh_min_opacity_coverage, 1e-6)
+        visibility_loss = max(
+            0.0,
+            self.dust3r_refresh_min_visible_gaussian_ratio - visible_ratio,
+        ) / max(self.dust3r_refresh_min_visible_gaussian_ratio, 1e-6)
+        geometry_loss = max(0.0, np.log(max(depth_ratio, 1.0))) / max(
+            np.log(max(self.dust3r_refresh_max_depth_change_ratio, 1.0 + 1e-6)),
+            1e-6,
+        )
+        bootstrap_loss = 1.0 if self.bootstrap_refresh_pending() else 0.0
+        map_evidence_loss = (
+            self.dust3r_refresh_photo_weight * photo_loss
+            + self.dust3r_refresh_opacity_weight * opacity_loss
+            + self.dust3r_refresh_visibility_weight * visibility_loss
+            + self.dust3r_refresh_geometry_weight * geometry_loss
+            + self.dust3r_refresh_bootstrap_weight * bootstrap_loss
+        )
+
         return {
             "tracking_loss": tracking_loss,
             "loss_ratio": loss_ratio,
@@ -815,7 +863,20 @@ class FrontEnd(mp.Process):
             "visible_ratio": visible_ratio,
             "median_depth": median_depth,
             "depth_ratio": depth_ratio,
+            "photo_loss": photo_loss,
+            "opacity_loss": opacity_loss,
+            "visibility_loss": visibility_loss,
+            "geometry_loss": geometry_loss,
+            "bootstrap_loss": bootstrap_loss,
+            "map_evidence_loss": map_evidence_loss,
         }
+
+    def bootstrap_refresh_pending(self):
+        return (
+            self.dust3r_refresh_force_after_bootstrap
+            and not self.dust3r_first_refresh_done
+            and len(self.current_window) > 0
+        )
 
     def should_trigger_dust3r_refresh(self, cur_frame_idx, health):
         if (
@@ -842,31 +903,26 @@ class FrontEnd(mp.Process):
             else len(self.kf_indices)
         )
 
-        if (
-            self.dust3r_refresh_force_after_bootstrap
-            and not self.dust3r_first_refresh_done
-            and cur_frame_idx > self.current_window[-1]
-        ):
-            return True, "initial_multiview"
-
-        if frame_gap < self.dust3r_refresh_min_frame_gap:
-            return False, None
-        if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
+        if health["map_evidence_loss"] < self.dust3r_refresh_loss_threshold:
             return False, None
 
-        if health["opacity_coverage"] < self.dust3r_refresh_min_opacity_coverage:
-            return True, "low_opacity_coverage"
-        if health["visible_ratio"] < self.dust3r_refresh_min_visible_gaussian_ratio:
-            return True, "low_visible_gaussian_ratio"
-        if health["loss_ratio"] > self.dust3r_refresh_max_tracking_loss_ratio:
-            return True, "tracking_loss_spike"
-        if health["depth_ratio"] > self.dust3r_refresh_max_depth_change_ratio:
-            return True, "depth_distribution_shift"
-        return False, None
+        # The loss decides whether geometry is needed. Frame/keyframe gaps remain
+        # compute-budget constraints, except for the bootstrap uncertainty term.
+        if health["bootstrap_loss"] <= 0.0:
+            if frame_gap < self.dust3r_refresh_min_frame_gap:
+                return False, None
+            if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
+                return False, None
 
-    def prepare_dust3r_refresh_payload(self, cur_frame_idx, reason):
-        if reason == "initial_multiview":
+        return True, "map_evidence_loss"
+
+    def prepare_dust3r_refresh_payload(self, cur_frame_idx, reason, health=None):
+        bootstrap_refresh = (
+            health is not None and health.get("bootstrap_loss", 0.0) > 0.0
+        )
+        if bootstrap_refresh:
             self.dust3r_first_refresh_done = True
+
         candidate_indices = [idx for idx in self.current_window if idx != cur_frame_idx]
         if not candidate_indices:
             candidate_indices = [idx for idx in self.kf_indices if idx != cur_frame_idx]
@@ -879,7 +935,7 @@ class FrontEnd(mp.Process):
             candidate_pool=self.dust3r_refresh_candidate_pool,
             target_baseline=self.dust3r_refresh_target_baseline,
         )
-        if not ref_candidates and reason == "initial_multiview" and candidate_indices:
+        if not ref_candidates and bootstrap_refresh and candidate_indices:
             ref_idx = candidate_indices[0]
             baseline = torch.norm(
                 self.get_camera_center(cur_frame_idx) - self.get_camera_center(ref_idx)
@@ -906,9 +962,11 @@ class FrontEnd(mp.Process):
         self.last_dust3r_refresh_frame = cur_frame_idx
         self.last_dust3r_refresh_kf_count = len(self.kf_indices)
         self.dust3r_refresh_call_count += 1
+        loss_value = health["map_evidence_loss"] if health is not None else 0.0
         Log(
             f"DUSt3R refresh accepted for frame {cur_frame_idx}: "
-            f"{reason}, ref {payload['reference_frame_idx']}"
+            f"{reason}={loss_value:.3f}, "
+            f"ref {payload['reference_frame_idx']}"
         )
         return payload
 
@@ -1492,13 +1550,15 @@ class FrontEnd(mp.Process):
                         if refresh_requested:
                             Log(
                                 f"Requesting DUSt3R refresh at frame {cur_frame_idx}: "
-                                f"{refresh_reason}, loss_ratio={health['loss_ratio']:.3f}, "
-                                f"opacity={health['opacity_coverage']:.3f}, "
-                                f"visible={health['visible_ratio']:.3f}, "
-                                f"depth_ratio={health['depth_ratio']:.3f}"
+                                f"{refresh_reason}={health['map_evidence_loss']:.3f}, "
+                                f"photo={health['photo_loss']:.3f}, "
+                                f"opacity={health['opacity_loss']:.3f}, "
+                                f"visible={health['visibility_loss']:.3f}, "
+                                f"geometry={health['geometry_loss']:.3f}, "
+                                f"bootstrap={health['bootstrap_loss']:.3f}"
                             )
                             dust3r_payload = self.prepare_dust3r_refresh_payload(
-                                cur_frame_idx, refresh_reason
+                                cur_frame_idx, refresh_reason, health=health
                             )
                             if dust3r_payload is not None:
                                 self.last_dust3r_refresh_depth = health["median_depth"]

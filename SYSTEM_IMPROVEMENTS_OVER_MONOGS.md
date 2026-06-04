@@ -65,6 +65,13 @@ Training:
       min_visible_gaussian_ratio: 0.01
       ema_decay: 0.95
       max_calls: 3
+      loss:
+        threshold: 1.0
+        photometric_weight: 1.0
+        opacity_weight: 2.0
+        visibility_weight: 2.0
+        geometry_weight: 1.0
+        bootstrap_weight: 1.0
 ```
 
 ### Frame-0 Bootstrap
@@ -80,19 +87,37 @@ depth is not metric, config 04 normalizes the frame-0 depth median to 2.0 m.
 This means config 04 does not use the original MonoGS monocular pseudo-depth
 initialization for frame 0.
 
-### Event Refresh
+### Map Evidence Refresh
 
 After initialization, DUSt3R is not called for every keyframe. The frontend
-monitors simple map-health signals and requests a DUSt3R refresh only when the
-current map appears weak for the current view.
+computes a single map evidence loss and requests a DUSt3R refresh only when the
+current Gaussian map no longer explains the incoming frame well enough:
 
-Refresh triggers include:
+```text
+L_refresh =
+    w_photo * L_photo
+  + w_opacity * L_opacity
+  + w_visibility * L_visibility
+  + w_geometry * L_geometry
+  + w_bootstrap * L_bootstrap
+```
 
-- low opacity coverage
-- low visible-Gaussian ratio
-- tracking loss spike relative to the running average
-- large rendered-depth distribution change
-- one forced early multiview refresh after bootstrap
+The former map-health signals are now normalized components of this one loss:
+
+- `L_photo`: tracking loss increase relative to its running average
+- `L_opacity`: lack of rendered opacity support in the current frame
+- `L_visibility`: lack of visible Gaussian support
+- `L_geometry`: log-depth distribution innovation since the last refresh
+- `L_bootstrap`: temporary uncertainty after single-view bootstrap
+
+DUSt3R is invoked only when:
+
+```text
+L_refresh >= threshold
+```
+
+Frame/keyframe gaps and `max_calls` remain compute-budget constraints, not
+separate refresh events.
 
 Accepted refresh payloads are inserted through the same depth-backprojection
 path: use DUSt3R pointmap z as depth, scale it into the SLAM map scale, then
@@ -253,7 +278,7 @@ MonoGS.
 For config 04, the real improvements over baseline MonoGS are:
 
 - DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth.
-- DUSt3R is reused only as an event-triggered multiview depth refresh.
+- DUSt3R is reused only when the map evidence loss requests multiview refresh.
 - Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
 - The lifecycle controller conservatively prunes persistently low-opacity local
   bad Gaussians and logs Gaussian states.
