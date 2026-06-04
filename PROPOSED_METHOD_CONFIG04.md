@@ -108,6 +108,7 @@ nhung anchor nay khong con la tham so YAML can tinh chinh:
 Training:
   dust3r:
     mode: adaptive
+    refresh_only: True
     init:
       mode: "single_view"
       backproject_depth: True
@@ -159,8 +160,9 @@ muc tieu real-time SLAM. Vi vay config 04 chi dung DUSt3R nhu mot module refresh
 hinh hoc duoc dieu khien boi mot ham loss duy nhat.
 
 Sau khi da bootstrap frame 0, MonoGS tiep tuc tracking va mapping nhu binh
-thuong. DUSt3R chi duoc goi lai khi Gaussian map hien tai khong con giai thich
-du frame moi theo map evidence loss.
+thuong. Voi `refresh_only: True`, DUSt3R khong duoc goi cho keyframe thuong.
+DUSt3R chi duoc goi lai khi Gaussian map hien tai khong con giai thich du frame
+moi theo map evidence loss.
 
 ### 4.2. Map Evidence Loss
 
@@ -201,6 +203,7 @@ adaptive policy.
 ```yaml
 dust3r:
   mode: adaptive
+  refresh_only: True
   refresh:
     enabled: True
     backproject_depth: True
@@ -456,6 +459,7 @@ Khi trinh bay phuong phap va thuc nghiem, nen bao cao cac tham so sau:
 ```yaml
 DUSt3R:
   mode: adaptive
+  refresh_only: True
   init mode: single_view
   init backproject_depth: True
   refresh enabled: True

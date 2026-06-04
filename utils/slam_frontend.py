@@ -47,6 +47,7 @@ class FrontEnd(mp.Process):
         self.use_dust3r = False
         self.dust3r_config = {}
         self.dust3r_adaptive = False
+        self.dust3r_refresh_only = False
         self.dust3r_device = self.device
         self.dust3r_image_size = 512
         self.dust3r_batch_size = 1
@@ -142,6 +143,9 @@ class FrontEnd(mp.Process):
         self.dust3r_config = self.config["Training"].get("dust3r", {})
         self.use_dust3r = bool(self.dust3r_config.get("enabled", False))
         self.dust3r_adaptive = self.dust3r_config.get("mode", "manual") == "adaptive"
+        self.dust3r_refresh_only = bool(
+            self.dust3r_config.get("refresh_only", False)
+        )
         self.dust3r_device = self.dust3r_config.get("device", self.device)
         self.dust3r_image_size = int(self.dust3r_config.get("image_size", 512))
         self.dust3r_batch_size = int(self.dust3r_config.get("batch_size", 1))
@@ -1596,6 +1600,8 @@ class FrontEnd(mp.Process):
                             )
                             if dust3r_payload is not None:
                                 self.last_dust3r_refresh_depth = health["median_depth"]
+                        elif self.dust3r_refresh_only:
+                            pass
                         elif self.dust3r_selection_enabled:
                             dust3r_payload = self.prepare_best_keyframe_dust3r(
                                 cur_frame_idx

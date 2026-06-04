@@ -4,6 +4,7 @@ Training:
   dust3r:
     enabled: True
     mode: adaptive
+    refresh_only: True
     require_initialized: False
     depth_max: 20.0
     scale:

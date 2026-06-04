@@ -32,6 +32,7 @@ Training:
   dust3r:
     enabled: True
     mode: adaptive
+    refresh_only: True
     require_initialized: False
     depth_max: 20.0
     scale:
@@ -62,9 +63,10 @@ initialization for frame 0.
 
 ### Map Evidence Refresh
 
-After initialization, DUSt3R is not called for every keyframe. The frontend
-computes a single map evidence loss and requests a DUSt3R refresh only when the
-current Gaussian map no longer explains the incoming frame well enough:
+After initialization, config 04 does not call DUSt3R for ordinary keyframes.
+The frontend computes a single map evidence loss and requests a DUSt3R refresh
+only when the current Gaussian map no longer explains the incoming frame well
+enough:
 
 ```text
 L_refresh =
