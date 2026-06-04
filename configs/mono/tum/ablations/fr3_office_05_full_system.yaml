@@ -40,7 +40,6 @@ Training:
       min_valid_ratio: 0.08
       min_matches: 512
       min_score: 1.5
-      max_pointmap_scale_ratio: 1.75
     init:
       enabled: True
       mode: "single_view"
@@ -76,7 +75,6 @@ Training:
         min_valid_ratio: 0.08
         min_matches: 512
         min_score: 1.5
-        max_pointmap_scale_ratio: 1.75
     optimization:
       enabled: True
       min_keyframe_gap: 3

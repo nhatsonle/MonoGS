@@ -8,7 +8,6 @@ Training:
     depth_max: 20.0
     scale:
       baseline_ratio: True
-      pointmap_sync: True
     init:
       enabled: True
       mode: "single_view"

@@ -10,5 +10,3 @@ Training:
   dust3r:
     scale:
       baseline_ratio: False
-      pointmap_sync: False
-

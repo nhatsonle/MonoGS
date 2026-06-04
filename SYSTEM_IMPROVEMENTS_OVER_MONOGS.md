@@ -11,7 +11,7 @@ tracking, local mapping, keyframe window, and bundle-adjustment flow. The active
 algorithmic changes over the original monocular MonoGS baseline are:
 
 1. DUSt3R depth bootstrap and event refresh
-2. DUSt3R pointmap scale synchronization
+2. Baseline-ratio DUSt3R depth scaling
 3. Online Gaussian lifecycle controller
 
 Evaluation logging for Gaussian count, model memory, optimizer memory, and CUDA
@@ -36,7 +36,6 @@ Training:
     depth_max: 20.0
     scale:
       baseline_ratio: True
-      pointmap_sync: True
     init:
       enabled: True
       mode: "single_view"
@@ -97,8 +96,8 @@ fires, adaptive config 04 allows DUSt3R to run instead of requiring a fixed call
 budget.
 
 Accepted refresh payloads are inserted through the same depth-backprojection
-path: use DUSt3R pointmap z as depth, scale it into the SLAM map scale, then
-backproject with the SLAM camera intrinsics.
+path: use DUSt3R pointmap z as depth, scale it with the baseline-ratio divisor,
+then backproject with the SLAM camera intrinsics.
 
 Relevant files:
 
@@ -107,43 +106,28 @@ Relevant files:
 - `gaussian_splatting/scene/gaussian_model.py`
 - `utils/dust3r_utils.py`
 
-## 2. DUSt3R Pointmap Scale Synchronization
+## 2. Baseline-Ratio DUSt3R Depth Scaling
 
-DUSt3R pointmaps have an arbitrary scale. Config 04 enables both a fallback
-baseline-ratio scale and synchronized pointmap scaling:
+DUSt3R pointmaps have an arbitrary scale. Config 04 uses a single
+baseline-ratio scale divisor for multiview DUSt3R refreshes:
 
 ```yaml
 Training:
   dust3r:
     scale:
       baseline_ratio: True
-      pointmap_sync: True
 ```
 
-`baseline_ratio` estimates a fallback scale divisor from the DUSt3R pair
-translation and the SLAM keyframe baseline:
+`baseline_ratio` estimates the scale divisor from the DUSt3R pair translation
+and the SLAM keyframe baseline:
 
 ```text
 scale_divisor = ||t_dust3r|| / ||baseline_slam||
 ```
 
-`pointmap_sync` estimates separate scale divisors for the current and reference
-DUSt3R pointmaps using reciprocal matches. It solves for per-pointmap metric
-scales that make matched DUSt3R 3D directions agree with the current SLAM
-baseline:
-
-```text
-s_cur * vec_cur - s_ref * vec_ref ~= baseline_slam
-scale_divisors = 1 / [s_cur, s_ref]
-```
-
-If pointmap sync fails, the system falls back to the baseline-ratio divisor. If
-both mechanisms are disabled or unavailable, the payload scale is `1.0`.
-
-In config 04, this scale synchronization affects multiview DUSt3R refreshes.
-Even though config 04 uses depth backprojection instead of direct XYZ insertion,
-the backend still divides DUSt3R depth by the selected pointmap divisor before
-backprojection.
+The backend divides DUSt3R depth by this divisor before backprojection. This is
+kept deliberately simple because config 04 uses depth backprojection rather
+than direct XYZ pointmap insertion.
 
 Relevant files:
 
@@ -256,7 +240,7 @@ For config 04, the real improvements over baseline MonoGS are:
 
 - DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth.
 - DUSt3R is reused only when the map evidence loss requests multiview refresh.
-- Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
+- Baseline-ratio scaling aligns DUSt3R multiview depth to the SLAM map scale.
 - The adaptive lifecycle controller uses one aggressiveness setting to prune
   persistent low-evidence local Gaussians and suppress redundant densification.
 - Extra final logs report Gaussian count, model memory, optimizer memory, and

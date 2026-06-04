@@ -1,4 +1,4 @@
-# Phuong Phap De Xuat: MonoGS Voi DUSt3R Depth, Pointmap Scale Sync Va Gaussian Lifecycle
+# Phuong Phap De Xuat: MonoGS Voi DUSt3R Depth, Baseline-Ratio Scale Va Gaussian Lifecycle
 
 Tai lieu nay mo ta chi tiet co che hoat dong cua cau hinh:
 
@@ -14,7 +14,7 @@ ra hinh hoc ban dau sai, dac biet khi camera di chuyen qua cac khong gian co
 do sau thay doi manh.
 
 Phuong phap de xuat su dung DUSt3R nhu mot nguon depth prior online, ket hop
-voi co che dong bo scale cua pointmap va bo dieu khien lifecycle cho Gaussian.
+voi co che scale theo ty le baseline va bo dieu khien lifecycle cho Gaussian.
 He thong van giu luong tracking, local mapping, keyframe window va bundle
 adjustment cua MonoGS. DUSt3R khong duoc dung trong tracking moi frame, ma chi
 duoc goi o cac thoi diem can thiet de cung cap them hinh hoc.
@@ -34,8 +34,8 @@ tuong lai cua dataset. Cac thanh phan chinh gom:
 4. DUSt3R depth module: sinh pointmap/depth tu mot anh don le hoac mot cap
    anh, sau do chuyen depth nay thanh Gaussian thong qua backprojection bang
    camera intrinsics cua SLAM.
-5. Pointmap scale synchronization: dua depth/pointmap DUSt3R ve gan scale cua
-   SLAM map.
+5. Baseline-ratio scale: dua depth DUSt3R ve gan scale cua SLAM map bang ty le
+   baseline giua DUSt3R pair pose va SLAM camera centers.
 6. Gaussian lifecycle controller: theo doi tuoi, visibility, gradient va opacity
    cua moi Gaussian de gan nhan newborn, stable, cold hoac bad.
 
@@ -243,9 +243,9 @@ DUSt3R(frame_t, frame_ref) -> pointmap_t, pointmap_ref, matches, confidence
 ```
 
 Depth cua current frame duoc lay tu z-coordinate cua pointmap current, sau do
-dua qua co che scale sync va backproject thanh Gaussian moi.
+duoc scale bang baseline-ratio va backproject thanh Gaussian moi.
 
-## 5. Pointmap Scale Synchronization
+## 5. Baseline-Ratio Scale Cho DUSt3R Depth
 
 ### 5.1. Van De Scale Cua DUSt3R
 
@@ -253,19 +253,18 @@ DUSt3R du doan pointmap trong mot he toa do co scale khong hoan toan trung voi
 scale cua SLAM map. Neu chen depth/pointmap vao map ma khong dong bo scale,
 Gaussian moi co the nam qua gan hoac qua xa, lam mapping va tracking xau di.
 
-Config 04 bat hai co che scale:
+Config 04 dung mot co che scale duy nhat:
 
 ```yaml
 Training:
   dust3r:
     scale:
       baseline_ratio: True
-      pointmap_sync: True
 ```
 
 ### 5.2. Baseline-Ratio Scale
 
-Baseline-ratio la co che fallback don gian. He thong so sanh do dai translation
+Baseline-ratio so sanh do dai translation
 giua cap frame theo DUSt3R voi khoang cach camera center trong SLAM map:
 
 ```text
@@ -279,42 +278,16 @@ gia tri scale qua bat thuong, no duoc clip trong khoang cau hinh:
 scale_min <= scale_divisor <= scale_max
 ```
 
-### 5.3. Synchronized Pointmap Scaling
-
-Baseline-ratio chi cho mot scale chung. Tuy nhien DUSt3R tra ve hai pointmap
-cho current va reference, va scale cua hai pointmap co the lech nhau nhe. Vi
-vay config 04 dung pointmap sync de uoc luong hai scale rieng:
-
-```text
-s_cur, s_ref
-```
-
-Voi cac cap match 3D tu DUSt3R, he thong dua cac diem ve dang direction trong
-world frame cua SLAM. Sau do no giai bai toan least squares:
-
-```text
-s_cur * vec_cur - s_ref * vec_ref ~= baseline_SLAM
-```
-
-Ket qua duoc chuyen thanh scale divisor:
-
-```text
-scale_divisors = 1 / [s_cur, s_ref]
-```
-
-He thong ap dung loc residual bang median absolute deviation de giam anh huong
-cua outlier, roi giai lai least squares. Neu so match hop le qua it, nghiem
-khong huu han, hoac scale khong hop le, he thong quay ve baseline-ratio.
-
-Trong config 04, pointmap sync khong dung de chen truc tiep XYZ DUSt3R. No dung
-de scale depth z cua pointmap truoc khi backproject:
+Trong config 04, scale divisor nay khong dung de chen truc tiep XYZ DUSt3R. No
+dung de scale depth z cua pointmap truoc khi backproject:
 
 ```text
 depth_scaled = depth_DUSt3R / scale_divisor_selected
 ```
 
-Day la diem quan trong: config 04 van la depth-backprojection method, nhung
-multiview depth duoc dua ve scale cua SLAM map bang pointmap sync.
+Day la diem quan trong: config 04 van la depth-backprojection method, va
+multiview depth duoc dua ve scale cua SLAM map bang baseline-ratio thay vi
+pointmap sync.
 
 ## 6. Tracking Va Mapping Sau Khi Co DUSt3R Depth
 
@@ -467,7 +440,7 @@ For each new frame t
   -> neu map evidence loss vuot nguong refresh:
        chon reference keyframe hop le
        DUSt3R(frame_t, frame_ref)
-       pointmap scale synchronization
+       baseline-ratio scale
        lay depth z cua frame_t
        backproject depth da scale
        chen Gaussian moi vao map
@@ -487,7 +460,6 @@ DUSt3R:
   init backproject_depth: True
   refresh enabled: True
   refresh max_calls: 3
-  pointmap_sync: True
   baseline_ratio: True
 
 Lifecycle:

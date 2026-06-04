@@ -51,7 +51,6 @@ class FrontEnd(mp.Process):
         self.dust3r_image_size = 512
         self.dust3r_batch_size = 1
         self.dust3r_use_baseline_ratio_scale = True
-        self.dust3r_use_pointmap_scale_sync = True
         self.dust3r_scale_min = 0.05
         self.dust3r_scale_max = 20.0
         self.dust3r_min_baseline = 0.05
@@ -66,7 +65,6 @@ class FrontEnd(mp.Process):
         self.dust3r_min_valid_ratio = 0.05
         self.dust3r_min_matches = 128
         self.dust3r_min_score = 0.0
-        self.dust3r_max_pointmap_scale_ratio = 2.0
         self.dust3r_min_keyframe_gap = 0
         self.last_dust3r_kf_count = -1
         self.dust3r_calls = 0
@@ -88,7 +86,6 @@ class FrontEnd(mp.Process):
         self.dust3r_init_min_valid_ratio = 0.05
         self.dust3r_init_min_matches = 128
         self.dust3r_init_min_score = 0.0
-        self.dust3r_init_max_pointmap_scale_ratio = 2.0
         self.dust3r_initialized_from_pair = False
         self.dust3r_refresh_enabled = False
         self.dust3r_refresh_backproject_depth = True
@@ -153,9 +150,6 @@ class FrontEnd(mp.Process):
         self.dust3r_use_baseline_ratio_scale = bool(
             dust3r_scale_config.get("baseline_ratio", True)
         )
-        self.dust3r_use_pointmap_scale_sync = bool(
-            dust3r_scale_config.get("pointmap_sync", True)
-        )
         self.dust3r_scale_min = float(self.dust3r_config.get("scale_min", 0.05))
         self.dust3r_scale_max = float(self.dust3r_config.get("scale_max", 20.0))
         self.dust3r_min_baseline = float(
@@ -197,9 +191,6 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_min_matches = int(dust3r_selection.get("min_matches", 128))
         self.dust3r_min_score = float(dust3r_selection.get("min_score", 0.0))
-        self.dust3r_max_pointmap_scale_ratio = float(
-            dust3r_selection.get("max_pointmap_scale_ratio", 2.0)
-        )
         dust3r_optimization = self.dust3r_config.get("optimization", {})
         self.dust3r_min_keyframe_gap = int(
             dust3r_optimization.get("min_keyframe_gap", 0)
@@ -251,12 +242,6 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_init_min_score = float(
             dust3r_init_selection.get("min_score", self.dust3r_min_score)
-        )
-        self.dust3r_init_max_pointmap_scale_ratio = float(
-            dust3r_init_selection.get(
-                "max_pointmap_scale_ratio",
-                self.dust3r_max_pointmap_scale_ratio,
-            )
         )
         dust3r_refresh = self.dust3r_config.get("refresh", {})
         self.dust3r_refresh_enabled = bool(dust3r_refresh.get("enabled", False))
@@ -754,26 +739,15 @@ class FrontEnd(mp.Process):
         valid_ratio = min(valid_ratios) if valid_ratios else 0.0
         mean_conf = min(mean_confs) if mean_confs else 0.0
         match_count = int(dust3r_payload.get("match_count", 0))
-        pointmap_scale_divisors = dust3r_payload.get("pointmap_scale_divisors", [])
-        if len(pointmap_scale_divisors) >= 2:
-            scale_ratio = abs(
-                float(pointmap_scale_divisors[1])
-                / max(abs(float(pointmap_scale_divisors[0])), 1e-8)
-            )
-        else:
-            scale_ratio = 1.0
-        scale_penalty = np.exp(-max(0.0, np.log(max(scale_ratio, 1e-8))) ** 2)
         score = (
             mean_conf
             * np.log1p(max(match_count, 0))
             * max(valid_ratio, 1e-6)
-            * scale_penalty
         )
         return {
             "valid_ratio": valid_ratio,
             "mean_conf": mean_conf,
             "match_count": match_count,
-            "scale_ratio": scale_ratio,
             "score": float(score),
         }
 
@@ -783,12 +757,10 @@ class FrontEnd(mp.Process):
             dust3r_payload["quality"] = stats
             hard_min_matches = 32 if init else 64
             hard_valid_ratio = 0.01 if init else 0.02
-            hard_scale_ratio = 4.0
             checks = [
                 stats["valid_ratio"] >= hard_valid_ratio,
                 stats["match_count"] >= hard_min_matches,
                 np.isfinite(stats["score"]),
-                stats["scale_ratio"] <= hard_scale_ratio,
             ]
             if all(checks):
                 return True
@@ -796,7 +768,6 @@ class FrontEnd(mp.Process):
                 "Rejecting DUSt3R payload as invalid: "
                 f"valid={stats['valid_ratio']:.3f}/{hard_valid_ratio:.3f}, "
                 f"matches={stats['match_count']}/{hard_min_matches}, "
-                f"scale_ratio={stats['scale_ratio']:.3f}/{hard_scale_ratio:.3f}, "
                 f"score={stats['score']:.3f}"
             )
             return False
@@ -806,13 +777,11 @@ class FrontEnd(mp.Process):
             min_valid_ratio = self.dust3r_init_min_valid_ratio
             min_matches = self.dust3r_init_min_matches
             min_score = self.dust3r_init_min_score
-            max_scale_ratio = self.dust3r_init_max_pointmap_scale_ratio
         else:
             min_pair_conf = self.dust3r_min_pair_conf
             min_valid_ratio = self.dust3r_min_valid_ratio
             min_matches = self.dust3r_min_matches
             min_score = self.dust3r_min_score
-            max_scale_ratio = self.dust3r_max_pointmap_scale_ratio
 
         stats = self.summarize_dust3r_payload(dust3r_payload)
         dust3r_payload["quality"] = stats
@@ -821,7 +790,6 @@ class FrontEnd(mp.Process):
             stats["valid_ratio"] >= min_valid_ratio,
             stats["match_count"] >= min_matches,
             stats["score"] >= min_score,
-            stats["scale_ratio"] <= max_scale_ratio,
         ]
         if all(checks):
             return True
@@ -831,8 +799,7 @@ class FrontEnd(mp.Process):
             f"conf={stats['mean_conf']:.3f}/{min_pair_conf:.3f}, "
             f"valid={stats['valid_ratio']:.3f}/{min_valid_ratio:.3f}, "
             f"matches={stats['match_count']}/{min_matches}, "
-            f"score={stats['score']:.3f}/{min_score:.3f}, "
-            f"scale_ratio={stats['scale_ratio']:.3f}/{max_scale_ratio:.3f}"
+            f"score={stats['score']:.3f}/{min_score:.3f}"
         )
         return False
 
@@ -899,7 +866,6 @@ class FrontEnd(mp.Process):
                 f"baseline {baseline:.4f}m, conf {stats['mean_conf']:.3f}, "
                 f"valid {stats['valid_ratio']:.3f}, "
                 f"matches {stats['match_count']}, "
-                f"scale_ratio {stats['scale_ratio']:.3f}, "
                 f"score {stats['score']:.3f}"
             )
             if not self.dust3r_payload_passes_quality(payload, init=init):
@@ -1176,104 +1142,6 @@ class FrontEnd(mp.Process):
             )
         return clipped_scale_divisor
 
-    def estimate_dust3r_pointmap_scale_divisors(
-        self,
-        poses,
-        matches_3d0,
-        matches_3d1,
-        cur_frame_idx,
-        ref_frame_idx,
-        fallback_scale_divisor,
-    ):
-        if not self.dust3r_use_pointmap_scale_sync:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-        if matches_3d0 is None or matches_3d1 is None:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-        if len(matches_3d0) < 32 or len(matches_3d1) < 32:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-
-        pose0 = np.asarray(poses[0], dtype=np.float64)
-        pose1 = np.asarray(poses[1], dtype=np.float64)
-        pts0 = np.asarray(matches_3d0, dtype=np.float64)
-        pts1 = np.asarray(matches_3d1, dtype=np.float64)
-        finite = np.isfinite(pts0).all(axis=1) & np.isfinite(pts1).all(axis=1)
-        if finite.sum() < 32:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-        pts0 = pts0[finite]
-        pts1 = pts1[finite]
-
-        max_matches = 4096
-        if pts0.shape[0] > max_matches:
-            rng = np.random.default_rng(0)
-            sample = rng.choice(pts0.shape[0], size=max_matches, replace=False)
-            pts0 = pts0[sample]
-            pts1 = pts1[sample]
-
-        local0 = (pts0 - pose0[:3, 3]) @ pose0[:3, :3]
-        local1 = (pts1 - pose1[:3, 3]) @ pose1[:3, :3]
-        valid_depth = (local0[:, 2] > 1e-6) & (local1[:, 2] > 1e-6)
-        if valid_depth.sum() < 32:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-        local0 = local0[valid_depth]
-        local1 = local1[valid_depth]
-
-        c2w0 = torch.linalg.inv(
-            getWorld2View2(self.cameras[cur_frame_idx].R, self.cameras[cur_frame_idx].T)
-        ).detach().cpu().numpy()
-        c2w1 = torch.linalg.inv(
-            getWorld2View2(self.cameras[ref_frame_idx].R, self.cameras[ref_frame_idx].T)
-        ).detach().cpu().numpy()
-        vec0 = local0 @ c2w0[:3, :3].T
-        vec1 = local1 @ c2w1[:3, :3].T
-        baseline = c2w1[:3, 3] - c2w0[:3, 3]
-
-        def solve_scales(mask):
-            a = np.stack((vec0[mask], -vec1[mask]), axis=2).reshape(-1, 2)
-            b = np.repeat(baseline[None, :], int(mask.sum()), axis=0).reshape(-1)
-            try:
-                scales, *_ = np.linalg.lstsq(a, b, rcond=None)
-            except np.linalg.LinAlgError:
-                return None
-            return scales
-
-        mask = np.ones(vec0.shape[0], dtype=bool)
-        metric_scales = solve_scales(mask)
-        if metric_scales is None:
-            return [fallback_scale_divisor, fallback_scale_divisor]
-        for _ in range(2):
-            residual = np.linalg.norm(
-                metric_scales[0] * vec0 - metric_scales[1] * vec1 - baseline,
-                axis=1,
-            )
-            median = np.median(residual)
-            mad = np.median(np.abs(residual - median)) + 1e-8
-            mask = residual < median + 3.0 * 1.4826 * mad
-            if mask.sum() < 32:
-                break
-            refined = solve_scales(mask)
-            if refined is None:
-                break
-            metric_scales = refined
-
-        if (
-            not np.isfinite(metric_scales).all()
-            or metric_scales[0] <= 1e-8
-            or metric_scales[1] <= 1e-8
-        ):
-            return [fallback_scale_divisor, fallback_scale_divisor]
-
-        scale_divisors = 1.0 / metric_scales
-        scale_divisors = np.clip(
-            scale_divisors, self.dust3r_scale_min, self.dust3r_scale_max
-        )
-        pointmap_ratio = scale_divisors[1] / max(scale_divisors[0], 1e-8)
-        Log(
-            "DUSt3R pointmap scale divisors: "
-            f"cur={scale_divisors[0]:.6f}, ref={scale_divisors[1]:.6f}, "
-            f"ref/cur={pointmap_ratio:.4f}, matches={int(mask.sum())}"
-        )
-        return [float(scale_divisors[0]), float(scale_divisors[1])]
-
     def prepare_keyframe_dust3r(self, cur_frame_idx, ref_frame_idx, init=False):
         if not self.use_dust3r or self.dust3r_model is None:
             return None
@@ -1291,7 +1159,7 @@ class FrontEnd(mp.Process):
                 _matches_im1,
                 _matches_3d0,
                 _matches_3d1,
-                poses,
+                _poses,
                 depthmaps,
                 confs,
                 match_count,
@@ -1307,15 +1175,6 @@ class FrontEnd(mp.Process):
         scale_divisor = self.estimate_dust3r_scale(
             trans_pose, cur_frame_idx, ref_frame_idx
         )
-        pointmap_scale_divisors = self.estimate_dust3r_pointmap_scale_divisors(
-            poses,
-            _matches_3d0,
-            _matches_3d1,
-            cur_frame_idx,
-            ref_frame_idx,
-            scale_divisor,
-        )
-        scale_divisor = pointmap_scale_divisors[0]
         world_frame_idx = cur_frame_idx if reference_idx == 0 else ref_frame_idx
         Log(
             f"DUSt3R keyframe payload: kf {cur_frame_idx}, ref {ref_frame_idx}, "
@@ -1327,11 +1186,9 @@ class FrontEnd(mp.Process):
             "imgs": imgs,
             "masks": masks,
             "confs": confs,
-            "poses": poses,
             "depthmaps": depthmaps,
             "match_count": match_count,
             "scale": scale_divisor,
-            "pointmap_scale_divisors": pointmap_scale_divisors,
             "reference_idx": reference_idx,
             "reference_frame_idx": ref_frame_idx,
             "world_frame_idx": world_frame_idx,

@@ -248,13 +248,7 @@ class BackEnd(mp.Process):
             if use_dust3r_depth:
                 pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
                 pointmap_index = pointmap_indices[0]
-                pointmap_scale_divisors = dust3r_payload.get(
-                    "pointmap_scale_divisors", None
-                )
-                if pointmap_scale_divisors is not None:
-                    scale = pointmap_scale_divisors[pointmap_index]
-                else:
-                    scale = dust3r_payload.get("scale", 1.0)
+                scale = dust3r_payload.get("scale", 1.0)
                 fused_point_cloud, features, scales, rots, opacities = (
                     self.gaussians.create_pcd_from_dust3r_depth(
                         viewpoint,
@@ -631,11 +625,7 @@ class BackEnd(mp.Process):
             align_corners=False,
         )[0]
 
-        pointmap_scale_divisors = dust3r_payload.get("pointmap_scale_divisors", None)
-        if pointmap_scale_divisors is not None:
-            scale = pointmap_scale_divisors[pointmap_index]
-        else:
-            scale = dust3r_payload.get("scale", 1.0)
+        scale = dust3r_payload.get("scale", 1.0)
         scale = float(scale)
         if not np.isfinite(scale) or abs(scale) < 1e-8:
             scale = 1.0

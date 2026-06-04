@@ -13,7 +13,6 @@ Training:
       enabled: True
     scale:
       baseline_ratio: False
-      pointmap_sync: False
     insertion:
       enabled: True
       opacity_threshold: 0.35
