@@ -23,6 +23,12 @@ Training:
   init_gaussian_extent: 30
   tracking_itr_num: 100
   mapping_itr_num: 80
+  # Photometric residual used by camera tracking.
+  #   l1    : original MonoGS opacity-weighted L1 (default, baseline behaviour)
+  #   l2    : opacity-weighted squared error (Gauss-Newton compatible)
+  #   huber : robust least-squares via IRLS weighting (robust + GN compatible)
+  tracking_loss: l1
+  tracking_huber_delta: 0.1
   gaussian_update_every: 150
   gaussian_update_offset: 50
   gaussian_th: 0.7

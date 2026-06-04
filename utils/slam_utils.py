@@ -67,8 +67,41 @@ def get_loss_tracking_rgb(config, image, depth, opacity, viewpoint):
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
     rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
-    l1 = opacity * torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-    return l1.mean()
+
+    # Residual mode controls how the per-pixel photometric error is reduced.
+    #   "l1"    : original MonoGS tracking loss (opacity-weighted L1). Default,
+    #             keeps baseline behaviour identical.
+    #   "l2"    : opacity-weighted squared error. Matches the least-squares
+    #             objective that Gauss-Newton / Levenberg-Marquardt assumes.
+    #   "huber" : robustified least-squares (quadratic near zero, linear in the
+    #             tails) via IRLS weighting. Robust like L1 but GN-compatible.
+    mode = config["Training"].get("tracking_loss", "l1")
+
+    residual = (image - gt_image) * rgb_pixel_mask
+
+    if mode == "l1":
+        # opacity multiplies the residual before abs(), exactly as in MonoGS.
+        l1 = opacity * torch.abs(residual)
+        return l1.mean()
+
+    # For l2/huber, opacity acts as a per-pixel weight on the squared error.
+    # Detaching keeps the weight from injecting an opacity-gradient term that
+    # would not belong in a clean pose least-squares objective.
+    weight = opacity.detach()
+
+    if mode == "l2":
+        return (weight * residual.pow(2)).mean()
+
+    if mode == "huber":
+        delta = config["Training"].get("tracking_huber_delta", 0.1)
+        abs_r = torch.abs(residual)
+        quadratic = torch.minimum(abs_r, torch.as_tensor(delta, device=abs_r.device))
+        # 0.5*quad^2 + delta*(|r|-quad) is the standard Huber; equivalent to an
+        # IRLS-weighted squared error with weight min(1, delta/|r|).
+        huber = 0.5 * quadratic.pow(2) + delta * (abs_r - quadratic)
+        return (weight * huber).mean()
+
+    raise ValueError(f"Unknown Training.tracking_loss mode: {mode!r}")
 
 
 def get_loss_tracking_rgbd(
