@@ -133,6 +133,11 @@ class FrontEnd(mp.Process):
         self.save_trj_kf_intv = self.config["Results"]["save_trj_kf_intv"]
 
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
+        # Camera-tracking pose optimizer: "adam" (1st-order, MonoGS default) or
+        # "lbfgs" (quasi-Newton, 2nd-order curvature from the grad_tau history).
+        self.tracking_optimizer = self.config["Training"].get(
+            "tracking_optimizer", "adam"
+        )
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.kf_min_interval = int(self.config["Training"].get("kf_min_interval", 0))
         self.window_size = self.config["Training"]["window_size"]
@@ -1202,6 +1207,129 @@ class FrontEnd(mp.Process):
             "init": init,
         }
 
+    def _push_tracking_gui(self, viewpoint):
+        self.q_main2vis.put(
+            gui_utils.GaussianPacket(
+                current_frame=viewpoint,
+                gtcolor=viewpoint.original_image,
+                gtdepth=viewpoint.depth
+                if not self.monocular
+                else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+            )
+        )
+
+    def _tracking_adam(self, viewpoint, opt_params):
+        # Original MonoGS 1st-order tracking: Adam on the SE(3) delta, baking the
+        # delta into R/T after every step via update_pose().
+        pose_optimizer = torch.optim.Adam(opt_params)
+        tracking_loss_value = None
+        render_pkg = None
+        for tracking_itr in range(self.tracking_itr_num):
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+            pose_optimizer.zero_grad()
+            loss_tracking = get_loss_tracking(
+                self.config, image, depth, opacity, viewpoint
+            )
+            tracking_loss_value = float(loss_tracking.detach().item())
+            loss_tracking.backward()
+
+            with torch.no_grad():
+                pose_optimizer.step()
+                converged = update_pose(viewpoint)
+
+            if tracking_itr % 10 == 0:
+                self._push_tracking_gui(viewpoint)
+            if converged:
+                break
+        return render_pkg, tracking_loss_value
+
+    def _tracking_lbfgs(self, viewpoint, opt_params):
+        # 2nd-order tracking via L-BFGS: the curvature of the 6-DoF pose is
+        # approximated from the history of grad_tau, so each outer step takes a
+        # near-Newton stride instead of a small gradient step. A strong-Wolfe
+        # line search keeps it stable on the robust (Huber) tracking residual.
+        #
+        # The SE(3) delta must NOT be baked into R/T while L-BFGS is still
+        # probing within one step() (its line search evaluates the closure
+        # several times and relies on the delta accumulating). We therefore
+        # bake + reset the delta with update_pose() only AFTER each step()
+        # completes, then re-linearize for the next outer iteration.
+        params = [g["params"][0] for g in opt_params]
+        lr = float(self.config["Training"].get("tracking_lbfgs_lr", 1.0))
+        inner_iter = int(self.config["Training"].get("tracking_lbfgs_inner_iter", 5))
+        # Outer iterations re-bake the delta into R/T (re-linearization point).
+        outer_iter = int(
+            self.config["Training"].get(
+                "tracking_lbfgs_outer_iter",
+                max(1, self.tracking_itr_num // inner_iter),
+            )
+        )
+
+        last = {"loss": None, "render_pkg": None}
+
+        def closure():
+            pose_optimizer.zero_grad()
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+            loss_tracking = get_loss_tracking(
+                self.config, image, depth, opacity, viewpoint
+            )
+            loss_tracking.backward()
+            last["loss"] = float(loss_tracking.detach().item())
+            last["render_pkg"] = render_pkg
+            return loss_tracking
+
+        tracking_loss_value = None
+        render_pkg = None
+        for outer in range(outer_iter):
+            pose_optimizer = torch.optim.LBFGS(
+                params,
+                lr=lr,
+                max_iter=inner_iter,
+                line_search_fn="strong_wolfe",
+            )
+            pose_optimizer.step(closure)
+            tracking_loss_value = last["loss"]
+            render_pkg = last["render_pkg"]
+
+            with torch.no_grad():
+                converged = update_pose(viewpoint)
+
+            self._push_tracking_gui(viewpoint)
+            if converged:
+                break
+
+        # Guarantee a render_pkg even if outer_iter somehow ran zero times.
+        if render_pkg is None:
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            tracking_loss_value = float(
+                get_loss_tracking(
+                    self.config,
+                    render_pkg["render"],
+                    render_pkg["depth"],
+                    render_pkg["opacity"],
+                    viewpoint,
+                )
+                .detach()
+                .item()
+            )
+        return render_pkg, tracking_loss_value
+
     def tracking(self, cur_frame_idx, viewpoint):
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
         if self.pose_init_mode == "constant_velocity" and (
@@ -1245,41 +1373,20 @@ class FrontEnd(mp.Process):
             }
         )
 
-        pose_optimizer = torch.optim.Adam(opt_params)
-        tracking_loss_value = None
-        for tracking_itr in range(self.tracking_itr_num):
-            render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
+        if self.tracking_optimizer == "lbfgs":
+            render_pkg, tracking_loss_value = self._tracking_lbfgs(
+                viewpoint, opt_params
             )
-            image, depth, opacity = (
-                render_pkg["render"],
-                render_pkg["depth"],
-                render_pkg["opacity"],
+        else:
+            render_pkg, tracking_loss_value = self._tracking_adam(
+                viewpoint, opt_params
             )
-            pose_optimizer.zero_grad()
-            loss_tracking = get_loss_tracking(
-                self.config, image, depth, opacity, viewpoint
-            )
-            tracking_loss_value = float(loss_tracking.detach().item())
-            loss_tracking.backward()
 
-            with torch.no_grad():
-                pose_optimizer.step()
-                converged = update_pose(viewpoint)
-
-            if tracking_itr % 10 == 0:
-                self.q_main2vis.put(
-                    gui_utils.GaussianPacket(
-                        current_frame=viewpoint,
-                        gtcolor=viewpoint.original_image,
-                        gtdepth=viewpoint.depth
-                        if not self.monocular
-                        else np.zeros((viewpoint.image_height, viewpoint.image_width)),
-                    )
-                )
-            if converged:
-                break
-
+        image, depth, opacity = (
+            render_pkg["render"],
+            render_pkg["depth"],
+            render_pkg["opacity"],
+        )
         self.median_depth = get_median_depth(depth, opacity)
         render_pkg["tracking_loss"] = tracking_loss_value
         render_pkg["median_depth"] = self.median_depth

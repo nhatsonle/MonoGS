@@ -29,6 +29,14 @@ Training:
   #   huber : robust least-squares via IRLS weighting (robust + GN compatible)
   tracking_loss: l1
   tracking_huber_delta: 0.1
+  # Camera-tracking pose optimizer.
+  #   adam  : 1st-order, MonoGS default (up to tracking_itr_num render steps)
+  #   lbfgs : 2nd-order quasi-Newton; converges in far fewer render steps.
+  #           Use with tracking_loss: huber (Gauss-Newton compatible residual).
+  tracking_optimizer: adam
+  tracking_lbfgs_inner_iter: 5   # L-BFGS evals per outer (re-linearization) step
+  tracking_lbfgs_outer_iter: 6   # number of re-linearization steps
+  tracking_lbfgs_lr: 1.0
   gaussian_update_every: 150
   gaussian_update_offset: 50
   gaussian_th: 0.7

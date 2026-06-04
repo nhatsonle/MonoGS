@@ -1,0 +1,11 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# 2nd-order camera tracking: L-BFGS (quasi-Newton) on the SE(3) pose delta,
+# using the robust Huber tracking residual. Aims to converge in far fewer
+# render iterations than the 100-step Adam baseline.
+Training:
+  tracking_loss: huber
+  tracking_huber_delta: 0.1
+  tracking_optimizer: lbfgs
+  tracking_lbfgs_inner_iter: 5
+  tracking_lbfgs_outer_iter: 6

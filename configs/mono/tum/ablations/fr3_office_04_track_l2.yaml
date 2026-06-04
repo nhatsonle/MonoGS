@@ -1,0 +1,5 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# Same as config 04, but tracking uses an opacity-weighted L2 residual.
+Training:
+  tracking_loss: l2

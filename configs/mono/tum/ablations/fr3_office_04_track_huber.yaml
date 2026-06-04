@@ -1,0 +1,9 @@
+inherit_from: "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"
+
+# Same as config 04, but tracking uses a robust Huber least-squares residual
+# instead of the original opacity-weighted L1. This makes the tracking
+# objective Gauss-Newton compatible, in preparation for a 2nd-order
+# (Levenberg-Marquardt) pose optimizer.
+Training:
+  tracking_loss: huber
+  tracking_huber_delta: 0.1
