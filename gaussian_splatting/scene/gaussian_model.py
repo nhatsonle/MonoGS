@@ -514,11 +514,20 @@ class GaussianModel:
         point_size = self.config["Dataset"]["point_size"]
         dust3r_config = self.config["Training"].get("dust3r", {})
         dust3r_init_config = dust3r_config.get("init", {})
+        adaptive_init = init and dust3r_config.get("mode", "manual") == "adaptive"
         if init:
             downsample_factor = int(
-                dust3r_init_config.get("pcd_downsample", downsample_factor)
+                dust3r_init_config.get(
+                    "pcd_downsample",
+                    4 if adaptive_init else downsample_factor,
+                )
             )
-            point_size *= float(dust3r_init_config.get("point_size_scale", 1.0))
+            point_size *= float(
+                dust3r_init_config.get(
+                    "point_size_scale",
+                    0.25 if adaptive_init else 1.0,
+                )
+            )
         depth_min = float(dust3r_config.get("depth_min", 0.05))
         depth_max = float(dust3r_config.get("depth_max", 20.0))
         max_radius = float(dust3r_config.get("max_point_radius", 30.0))
@@ -670,15 +679,27 @@ class GaussianModel:
         point_size = self.config["Dataset"]["point_size"]
         dust3r_config = self.config["Training"].get("dust3r", {})
         dust3r_init_config = dust3r_config.get("init", {})
+        adaptive_init = init and dust3r_config.get("mode", "manual") == "adaptive"
         if init:
             downsample_factor = int(
-                dust3r_init_config.get("pcd_downsample", downsample_factor)
+                dust3r_init_config.get(
+                    "pcd_downsample",
+                    4 if adaptive_init else downsample_factor,
+                )
             )
-            point_size *= float(dust3r_init_config.get("point_size_scale", 1.0))
+            point_size *= float(
+                dust3r_init_config.get(
+                    "point_size_scale",
+                    0.25 if adaptive_init else 1.0,
+                )
+            )
         depth_min = float(dust3r_config.get("depth_min", 0.05))
         depth_max = float(dust3r_config.get("depth_max", 20.0))
         use_confidence_mask = bool(
-            dust3r_init_config.get("use_confidence_mask", True)
+            dust3r_init_config.get(
+                "use_confidence_mask",
+                False if adaptive_init else True,
+            )
         )
         fill_invalid_depth = bool(
             dust3r_init_config.get("fill_invalid_depth", False)
@@ -687,7 +708,9 @@ class GaussianModel:
         invalid_depth_noise = float(
             dust3r_init_config.get("invalid_depth_noise", 0.05)
         )
-        sample_stride = int(dust3r_init_config.get("sample_stride", 0))
+        sample_stride = int(
+            dust3r_init_config.get("sample_stride", 1 if adaptive_init else 0)
+        )
         gradient_extra_samples = bool(
             dust3r_init_config.get("gradient_extra_samples", False)
         )
@@ -704,7 +727,7 @@ class GaussianModel:
         )
         depth_scale_config = dust3r_init_config.get("depth_scale", {})
         normalize_init_depth_scale = bool(
-            depth_scale_config.get("enabled", False)
+            depth_scale_config.get("enabled", True if adaptive_init else False)
         )
         depth_scale_mode = depth_scale_config.get("mode", "median")
         target_median_depth = float(depth_scale_config.get("target_median", 2.0))

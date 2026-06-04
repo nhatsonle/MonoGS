@@ -100,29 +100,29 @@ vao he toa do XYZ noi bo cua DUSt3R.
 
 ### 3.2. Chuan Hoa Scale Cho Single-View Depth
 
-Single-view DUSt3R depth khong co metric scale tuyet doi. De tao mot map ban
-dau on dinh hon, config 04 chuan hoa median depth cua frame 0 ve 2.0 m:
+Single-view DUSt3R depth khong co metric scale tuyet doi. Trong adaptive mode,
+he thong van dung mot scale anchor noi bo de giu hanh vi bootstrap on dinh,
+nhung anchor nay khong con la tham so YAML can tinh chinh:
 
 ```yaml
 Training:
   dust3r:
+    mode: adaptive
     init:
-      depth_scale:
-        enabled: True
-        mode: "median"
-        target_median: 2.0
-        min_scale: 0.25
-        max_scale: 4.0
+      mode: "single_view"
+      backproject_depth: True
 ```
 
-Neu median depth DUSt3R ban dau la `median(z)`, he thong tinh mot divisor:
+Neu median depth DUSt3R ban dau la `median(z)`, adaptive policy tinh divisor
+noi bo:
 
 ```text
 depth_scale = median(z) / target_median
 ```
 
-Sau do depth duoc chia cho `depth_scale`. Divisor nay bi gioi han trong khoang
-`[0.25, 4.0]` de tranh cac truong hop DUSt3R sinh depth qua bat thuong.
+Sau do depth duoc chia cho `depth_scale`. `target_median` va gioi han divisor
+duoc giu nhu prior noi bo cua single-view bootstrap, thay vi la cac tham so
+nguoi dung phai dat bang tay.
 
 ### 3.3. Tao Gaussian Tu DUSt3R Depth
 
@@ -186,26 +186,24 @@ Gaussian map giai thich tot:
 - `L_bootstrap`: do bat dinh sau single-view bootstrap truoc khi co refresh
   multiview dau tien.
 
-DUSt3R duoc goi khi:
+Trong adaptive mode, DUSt3R duoc goi khi loss vuot nguong tu hoc theo lich su
+loss cua chinh sequence:
 
 ```text
-L_refresh >= threshold
+L_refresh >= median(L_refresh history) + k * MAD(L_refresh history)
 ```
 
 Nhung nguong nhu `max_tracking_loss_ratio`, `min_opacity_coverage`,
-`min_visible_gaussian_ratio` va `max_depth_change_ratio` khong con la cac event
-doc lap. Chung duoc dung lam thang chuan hoa cho cac thanh phan loss. Config 04
-dung:
+`min_visible_gaussian_ratio`, `max_depth_change_ratio` va cac weight cua loss
+khong con la tham so YAML can tinh chinh. Chung tro thanh default noi bo cua
+adaptive policy.
 
 ```yaml
-refresh:
-  loss:
-    threshold: 1.0
-    photometric_weight: 1.0
-    opacity_weight: 2.0
-    visibility_weight: 2.0
-    geometry_weight: 1.0
-    bootstrap_weight: 1.0
+dust3r:
+  mode: adaptive
+  refresh:
+    enabled: True
+    backproject_depth: True
 ```
 
 Vi `L_bootstrap` la mot thanh phan cua loss, lan refresh multiview som sau
@@ -214,32 +212,29 @@ khi map moi chi duoc khoi tao tu single-view DUSt3R depth.
 
 ### 4.3. Gioi Han Tan Suat Goi DUSt3R
 
-De tranh goi DUSt3R qua day, refresh phai thoa cac dieu kien cooldown:
+De tranh goi DUSt3R qua day, adaptive policy dung budget thay vi nhieu nguong
+cooldown co dinh:
 
 ```yaml
-min_frame_gap: 50
-min_keyframe_gap: 3
-max_calls: 3
+dust3r:
+  budget:
+    max_calls: 3
+    max_candidate_evals: 1
 ```
 
-Nghia la sau mot lan refresh, he thong phai doi it nhat 50 frame va 3 keyframe
-truoc khi duoc refresh tiep. Toan bo run chi duoc goi refresh toi da 3 lan.
+Frame/keyframe gap toi thieu va nguong loss warmup duoc suy ra noi bo tu
+adaptive policy. Toan bo run van chi duoc goi refresh toi da theo `max_calls`.
 
 ### 4.4. Chon Reference Frame
 
-Khi can refresh, frontend chon mot reference keyframe trong cac keyframe gan
-day. Reference duoc chon dua tren baseline voi frame hien tai:
+Khi can refresh, frontend chon reference keyframe bang normalized parallax:
 
-```yaml
-min_baseline: 0.08
-max_baseline: 1.20
-target_baseline: 0.30
-candidate_pool: 6
+```text
+parallax = baseline / median_rendered_depth
 ```
 
-Baseline qua nho lam multiview geometry kem on dinh. Baseline qua lon co the
-lam matching kho hon. Vi vay he thong uu tien cap frame co baseline gan
-`target_baseline`.
+Cach nay tranh phai tinh chinh `min_baseline`, `max_baseline` va
+`target_baseline` theo tung dataset metric scale khac nhau.
 
 Sau khi chon cap `(current, reference)`, he thong goi:
 
@@ -487,13 +482,11 @@ Khi trinh bay phuong phap va thuc nghiem, nen bao cao cac tham so sau:
 
 ```yaml
 DUSt3R:
+  mode: adaptive
   init mode: single_view
   init backproject_depth: True
-  init median target depth: 2.0 m
   refresh enabled: True
   refresh max_calls: 3
-  refresh min_frame_gap: 50
-  refresh min_keyframe_gap: 3
   pointmap_sync: True
   baseline_ratio: True
 

@@ -31,47 +31,21 @@ Relevant config:
 Training:
   dust3r:
     enabled: True
+    mode: adaptive
     require_initialized: False
     depth_max: 20.0
+    scale:
+      baseline_ratio: True
+      pointmap_sync: True
     init:
       enabled: True
       mode: "single_view"
       fallback_to_depth: False
       only: True
-      prior_only: False
       backproject_depth: True
-      use_confidence_mask: False
-      fill_invalid_depth: False
-      depth_scale:
-        enabled: True
-        mode: "median"
-        target_median: 2.0
-        min_scale: 0.25
-        max_scale: 4.0
     refresh:
       enabled: True
       backproject_depth: True
-      force_after_bootstrap: True
-      min_frame_gap: 50
-      min_keyframe_gap: 3
-      candidate_pool: 6
-      min_baseline: 0.08
-      max_baseline: 1.20
-      target_baseline: 0.30
-      min_opacity_coverage: 0.12
-      opacity_threshold: 0.25
-      max_tracking_loss_ratio: 2.2
-      max_depth_change_ratio: 2.0
-      min_visible_gaussian_ratio: 0.01
-      ema_decay: 0.95
-      max_calls: 3
-      loss:
-        threshold: 1.0
-        photometric_weight: 1.0
-        opacity_weight: 2.0
-        visibility_weight: 2.0
-        geometry_weight: 1.0
-        bootstrap_weight: 1.0
 ```
 
 ### Frame-0 Bootstrap
@@ -110,14 +84,17 @@ The former map-health signals are now normalized components of this one loss:
 - `L_geometry`: log-depth distribution innovation since the last refresh
 - `L_bootstrap`: temporary uncertainty after single-view bootstrap
 
-DUSt3R is invoked only when:
+In adaptive mode, the refresh threshold is estimated online from the running
+median and MAD of `L_refresh`, rather than being fixed in the config:
 
 ```text
-L_refresh >= threshold
+L_refresh >= median(L_refresh history) + k * MAD(L_refresh history)
 ```
 
-Frame/keyframe gaps and `max_calls` remain compute-budget constraints, not
-separate refresh events.
+Reference keyframes are selected by normalized parallax, so metric baseline
+ranges do not need to be tuned per dataset. When the map-evidence trigger
+fires, adaptive config 04 allows DUSt3R to run instead of requiring a fixed call
+budget.
 
 Accepted refresh payloads are inserted through the same depth-backprojection
 path: use DUSt3R pointmap z as depth, scale it into the SLAM map scale, then

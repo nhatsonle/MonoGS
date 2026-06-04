@@ -67,10 +67,16 @@ class BackEnd(mp.Process):
             else False
         )
         dust3r_config = self.config["Training"].get("dust3r", {})
-        pointmap_insert = dust3r_config.get("pointmap_insert", {})
-        self.dust3r_pointmap_insert_enabled = bool(
-            pointmap_insert.get("enabled", True)
-        )
+        if dust3r_config.get("mode", "manual") == "adaptive":
+            self.dust3r_pointmap_insert_enabled = bool(
+                dust3r_config.get("enabled", False)
+            )
+        else:
+            # Legacy ablations can still explicitly disable DUSt3R insertion.
+            pointmap_insert = dust3r_config.get("pointmap_insert", {})
+            self.dust3r_pointmap_insert_enabled = bool(
+                pointmap_insert.get("enabled", dust3r_config.get("enabled", False))
+            )
         insertion = dust3r_config.get("insertion", {})
         self.dust3r_insertion_enabled = bool(insertion.get("enabled", True))
         self.dust3r_opacity_threshold = float(
