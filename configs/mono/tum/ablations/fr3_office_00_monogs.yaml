@@ -6,3 +6,5 @@ Training:
   dust3r:
     enabled: False
   mapping_itr_num: 80
+Dataset:
+  num_frames: 200
