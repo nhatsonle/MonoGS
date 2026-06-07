@@ -1,0 +1,98 @@
+# Proposed method (config-04 equivalent) on the harder fr1/desk sequence.
+# Same DUSt3R depth bootstrap + event refresh + pointmap scale sync +
+# lifecycle controller as fr3_office_04_dust3r_event_refresh.yaml, but
+# pointed at fr1/desk (full sequence). Compare against fr1_desk_00_monogs.yaml.
+inherit_from: "configs/mono/tum/ablations/fr1_desk_00_monogs.yaml"
+Dataset:
+  num_frames: 200
+
+Training:
+  dust3r:
+    enabled: True
+    require_initialized: False
+    min_baseline: 0.25
+    max_baseline: 1.50
+    depth_max: 8.0
+    scale:
+      baseline_ratio: True
+      pointmap_sync: True
+    pointmap_insert:
+      enabled: True
+    selection:
+      enabled: True
+      candidate_pool: 4
+      max_candidate_evals: 1
+      target_baseline: 0.35
+      min_pair_conf: 3.0
+      min_valid_ratio: 0.08
+      min_matches: 512
+      min_score: 1.5
+      max_pointmap_scale_ratio: 1.75
+    init:
+      enabled: True
+      mode: "single_view"
+      fallback_to_depth: False
+      only: True
+      prior_only: False
+      backproject_depth: True
+      pcd_downsample: 4
+      point_size_scale: 0.25
+      sample_stride: 1
+      gradient_extra_samples: False
+      gradient_threshold: 0.08
+      gradient_stride: 2
+      max_points: 200000
+      use_pixel_footprint_scale: True
+      pixel_footprint_scale: 0.75
+      use_confidence_mask: False
+      fill_invalid_depth: False
+      depth_scale:
+        enabled: True
+        mode: "median"
+        target_median: 2.0
+        min_scale: 0.25
+        max_scale: 4.0
+      selection:
+        candidate_pool: 1
+        max_candidate_evals: 1
+        min_pair_conf: 3.0
+        min_valid_ratio: 0.08
+        min_matches: 128
+        min_score: 0.5
+        max_pointmap_scale_ratio: 1.75
+    refresh:
+      enabled: True
+      backproject_depth: True
+      force_after_bootstrap: True
+      min_frame_gap: 50
+      min_keyframe_gap: 3
+      candidate_pool: 6
+      min_baseline: 0.08
+      max_baseline: 1.20
+      target_baseline: 0.30
+      min_opacity_coverage: 0.12
+      opacity_threshold: 0.25
+      max_tracking_loss_ratio: 2.2
+      max_depth_change_ratio: 2.0
+      min_visible_gaussian_ratio: 0.01
+      ema_decay: 0.95
+      max_calls: 3
+    optimization:
+      min_keyframe_gap: 999999
+  lifecycle:
+    bad_min_visibility: 0
+    bad_opacity_threshold: 0.02
+    bad_patience: 5
+    bad_use_recent_visibility: false
+    cold_grad_threshold: 1.0e-05
+    cold_min_age: 80
+    cold_opacity_threshold: 0.5
+    enabled: true
+    freeze_cold: false
+    log_interval: 10
+    newborn_grace: 10
+    protect_newborn_from_prune: false
+    prune_bad: true
+    prune_bad_local_only: true
+    stable_min_visibility: 5
+    suppress_cold_densify: false

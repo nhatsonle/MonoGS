@@ -1,0 +1,46 @@
+# Config 04c on fr1/desk: the consolidated DUSt3R bug-fix config.
+#
+# Fixes the three real bugs found in the original config 04 (probed against the
+# raw DUSt3R output and the TUM GT depth sensor):
+#   1. max_points=200000: bootstrap dumped 200k Gaussians from a single frame
+#      (baseline MonoGS init is ~9.6k). pcd_downsample never ran because the
+#      point count exceeded max_points, so the map exploded and dense Gaussians
+#      injected photometric noise into tracking. -> biggest cause of ATE + bloat.
+#      Fix: downsample the DUSt3R pointmap the SAME way MonoGS baseline does
+#      (random keep 1/pcd_downsample), with max_points only as a final cap.
+#   2. Single-view bootstrap forced the map median depth to a constant 2.0m,
+#      while the true fr1/desk scene scale is ~1.2m (GT sensor). Fix: two-view
+#      ("pair") bootstrap with depth_scale normalization DISABLED, so the metric
+#      scale comes from the real camera baseline via pointmap_sync/baseline_ratio.
+#   3. force_after_bootstrap fired a refresh on a tiny baseline (~0.017m),
+#      producing a second inconsistent scale. Fix: disable it and require a
+#      larger init baseline (>=0.12m) so the scale estimate is well conditioned.
+#
+# Compare against:
+#   fr1_desk_00_monogs.yaml                baseline,              ATE 0.024, 22.6k G
+#   fr1_desk_04_dust3r_event_refresh.yaml  original config 04,    ATE 0.118, 39.3k G
+# Result: ATE 0.085, 20.0k G.
+inherit_from: "configs/mono/tum/ablations/fr1_desk_04_dust3r_event_refresh.yaml"
+
+Training:
+  dust3r:
+    init:
+      # Two-view bootstrap: derive metric scale from real baseline, not a
+      # constant median (fix #2).
+      mode: "pair"
+      max_search_frames: 25
+      fallback_to_depth: True
+      backproject_depth: True
+      depth_scale:
+        enabled: False
+      # Wait for a larger, better-conditioned baseline before bootstrap (fix #3).
+      min_baseline: 0.12
+      max_baseline: 1.50
+      # Downsample like MonoGS baseline (fix #1): pcd_downsample_init is 32, so
+      # the DUSt3R bootstrap budget matches the baseline init budget (~9.6k).
+      pcd_downsample: 32
+      # Final safety cap (well above the ~9.6k the downsample produces).
+      max_points: 50000
+    refresh:
+      # Do not force a refresh right after bootstrap on a tiny baseline (fix #3).
+      force_after_bootstrap: False

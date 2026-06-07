@@ -688,19 +688,27 @@ class GaussianModel:
         colors_img = cam.original_image.permute(1, 2, 0).detach().cpu()
         colors = colors_img[ys, xs].float().to(device="cuda")
 
-        if max_points > 0 and fused_point_cloud.shape[0] > max_points:
-            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:max_points]
-            fused_point_cloud = fused_point_cloud[perm]
-            colors = colors[perm]
-            z = z.to(device="cuda")[perm]
-        elif sample_stride <= 1 and downsample_factor > 1 and fused_point_cloud.shape[0] > downsample_factor:
+        z = z.to(device="cuda")
+        # Downsample the DUSt3R backprojected point cloud the same way MonoGS
+        # baseline downsamples its image/depth point cloud: keep a random
+        # 1/downsample_factor fraction of the points (cf. create_pcd_from_image_
+        # and_depth -> pcd_tmp.random_down_sample(1.0 / downsample_factor)). This
+        # keeps the DUSt3R init/refresh budget comparable to the baseline init
+        # budget (pcd_downsample_init) instead of dumping the full dense pointmap.
+        # When sample_stride > 1 the grid subsampling above already thinned the
+        # points, so we skip the extra random downsample in that case.
+        if sample_stride <= 1 and downsample_factor > 1 and fused_point_cloud.shape[0] > downsample_factor:
             keep_count = max(1, fused_point_cloud.shape[0] // downsample_factor)
             perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:keep_count]
             fused_point_cloud = fused_point_cloud[perm]
             colors = colors[perm]
-            z = z.to(device="cuda")[perm]
-        else:
-            z = z.to(device="cuda")
+            z = z[perm]
+        # max_points stays as a final safety cap after baseline-style downsampling.
+        if max_points > 0 and fused_point_cloud.shape[0] > max_points:
+            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:max_points]
+            fused_point_cloud = fused_point_cloud[perm]
+            colors = colors[perm]
+            z = z[perm]
 
         pcd_obj = BasicPointCloud(
             points=fused_point_cloud.detach().cpu().numpy(),

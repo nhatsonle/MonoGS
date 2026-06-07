@@ -274,6 +274,24 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
         self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
+        dust3r_depth_prior = self.dust3r_config.get("depth_prior", {})
+        self.dust3r_depth_prior_enabled = bool(
+            dust3r_depth_prior.get("enabled", False)
+        )
+        dust3r_sync = dust3r_depth_prior.get("sync_scale", {})
+        self.dust3r_depth_prior_sync_scale = bool(dust3r_sync.get("enabled", False))
+        self.dust3r_depth_prior_sync_opacity = float(
+            dust3r_sync.get("opacity_threshold", 0.5)
+        )
+        self.dust3r_depth_prior_sync_min_pixels = int(
+            dust3r_sync.get("min_pixels", 2000)
+        )
+        self.dust3r_depth_prior_sync_min_ratio = float(
+            dust3r_sync.get("min_ratio", 0.25)
+        )
+        self.dust3r_depth_prior_sync_max_ratio = float(
+            dust3r_sync.get("max_ratio", 4.0)
+        )
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -412,6 +430,7 @@ class FrontEnd(mp.Process):
         self.last_dust3r_refresh_frame = cur_frame_idx
         self.last_dust3r_refresh_kf_count = len(self.kf_indices)
         self.last_dust3r_refresh_depth = None
+        self.attach_dust3r_depth_prior(viewpoint, dust3r_payload)
         self.request_init(cur_frame_idx, viewpoint, None, dust3r_payload)
         self.reset = False
         Log(f"Initialized map request with DUSt3R single-view frame {cur_frame_idx}")
@@ -469,6 +488,8 @@ class FrontEnd(mp.Process):
                 depth_map = None
                 self.initialized = True
             self.dust3r_initialized_from_pair = True
+            if not self.dust3r_init_prior_only:
+                self.attach_dust3r_depth_prior(viewpoint, dust3r_payload)
             self.request_init(cur_frame_idx, viewpoint, depth_map, dust3r_payload)
             self.reset = False
             Log(
@@ -1107,6 +1128,112 @@ class FrontEnd(mp.Process):
             "init": init,
         }
 
+    def attach_dust3r_depth_prior(
+        self, viewpoint, dust3r_payload, render_depth=None, render_opacity=None
+    ):
+        """Store the metric-scaled DUSt3R depth on the viewpoint as a pose prior.
+
+        Reconstructs the same depth that the backend backprojects into Gaussians
+        (depthmap interpolated to image size, divided by the selected pointmap
+        scale divisor) so the tracking/mapping depth term is consistent with the
+        inserted geometry. No-op unless the depth_prior loss is enabled.
+
+        When render_depth/render_opacity are given (refresh keyframes), the depth
+        prior is additionally rescaled to match the current rendered map depth via
+        a robust median ratio. The rendered map depth is globally scale-consistent
+        (anchored at bootstrap), so this synchronizes every refresh keyframe's
+        DUSt3R scale to one common SLAM scale, removing the per-call scale
+        inconsistency (0.41/0.27/0.28/0.35...) that otherwise makes the depth
+        priors mutually contradictory during bundle adjustment.
+        """
+        if not self.dust3r_depth_prior_enabled or dust3r_payload is None:
+            return
+        depthmaps = dust3r_payload.get("depthmaps")
+        if depthmaps is None:
+            return
+        pointmap_indices = dust3r_payload.get("pointmap_indices", [0])
+        pointmap_index = pointmap_indices[0]
+        divisors = dust3r_payload.get("pointmap_scale_divisors", None)
+        if divisors is not None:
+            scale = float(divisors[pointmap_index])
+        else:
+            scale = float(dust3r_payload.get("scale", 1.0))
+        if not np.isfinite(scale) or abs(scale) < 1e-8:
+            scale = 1.0
+
+        depth = depthmaps[pointmap_index]
+        depth = (
+            depth.detach().cpu().numpy()
+            if hasattr(depth, "detach")
+            else np.asarray(depth)
+        )
+        depth_t = torch.from_numpy(depth.astype(np.float32))[None, None]
+        depth_t = torch.nn.functional.interpolate(
+            depth_t,
+            size=(viewpoint.image_height, viewpoint.image_width),
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
+        depth_t = depth_t / scale
+
+        # Scale synchronization: anchor this keyframe's DUSt3R depth to the
+        # current rendered map depth (which carries the global SLAM scale) so all
+        # refresh keyframes share one consistent scale.
+        sync_ratio = 1.0
+        if (
+            self.dust3r_depth_prior_sync_scale
+            and render_depth is not None
+            and render_opacity is not None
+        ):
+            rd = render_depth.detach().to(depth_t.device).view(*depth_t.shape)
+            ro = render_opacity.detach().to(depth_t.device).view(*depth_t.shape)
+            valid = (
+                torch.isfinite(rd)
+                & torch.isfinite(depth_t)
+                & (rd > 0.05)
+                & (depth_t > 0.05)
+                & (ro > self.dust3r_depth_prior_sync_opacity)
+            )
+            if valid.count_nonzero() >= self.dust3r_depth_prior_sync_min_pixels:
+                ratio = (rd[valid] / depth_t[valid]).median().item()
+                if (
+                    np.isfinite(ratio)
+                    and self.dust3r_depth_prior_sync_min_ratio
+                    <= ratio
+                    <= self.dust3r_depth_prior_sync_max_ratio
+                ):
+                    sync_ratio = float(ratio)
+                    depth_t = depth_t * sync_ratio
+                    Log(
+                        f"DUSt3R depth prior scale-synced to map for frame "
+                        f"{viewpoint.uid}: ratio {sync_ratio:.4f}"
+                    )
+                else:
+                    Log(
+                        f"DUSt3R depth prior scale-sync skipped for frame "
+                        f"{viewpoint.uid}: ratio {ratio:.4f} out of range"
+                    )
+
+        conf = None
+        confs = dust3r_payload.get("confs")
+        if confs is not None and pointmap_index < len(confs) and confs[pointmap_index] is not None:
+            conf_np = np.asarray(confs[pointmap_index], dtype=np.float32)
+            conf_t = torch.from_numpy(conf_np)[None, None]
+            conf_t = torch.nn.functional.interpolate(
+                conf_t,
+                size=(viewpoint.image_height, viewpoint.image_width),
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0]
+            conf = conf_t.detach().cpu().numpy()
+
+        viewpoint.dust3r_depth = depth_t.detach().cpu().numpy()
+        viewpoint.dust3r_depth_conf = conf
+        Log(
+            f"Attached DUSt3R depth prior to frame {viewpoint.uid} "
+            f"(scale {scale:.4f}, median {np.nanmedian(viewpoint.dust3r_depth):.3f}m)"
+        )
+
     def tracking(self, cur_frame_idx, viewpoint):
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
         if self.pose_init_mode == "constant_velocity" and (
@@ -1516,6 +1643,12 @@ class FrontEnd(mp.Process):
                                 )
                                 if dust3r_payload is not None:
                                     self.last_dust3r_kf_count = len(self.kf_indices)
+                    self.attach_dust3r_depth_prior(
+                        viewpoint,
+                        dust3r_payload,
+                        render_depth=render_pkg.get("depth"),
+                        render_opacity=render_pkg.get("opacity"),
+                    )
                     self.request_keyframe(
                         cur_frame_idx,
                         viewpoint,

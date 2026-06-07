@@ -1,0 +1,51 @@
+# Config 04i on fr1/desk: the full proposed extension on top of the 04c bug-fix.
+# Adds (a) a DUSt3R depth-prior pose constraint, (b) active multiview refresh, and
+# (c) cross-keyframe scale synchronization.
+#
+# Rationale (from the ablation chain):
+#   - The original config 04 only INSERTED Gaussians from DUSt3R and never used it
+#     in the pose loss, so refresh could not fix tracking drift. The depth-prior
+#     term adds DUSt3R depth as a pseudo-GT in the monocular tracking AND mapping
+#     loss, so pose / bundle adjustment is pulled toward the DUSt3R geometry.
+#   - With active refresh, each refresh keyframe carried a DIFFERENT DUSt3R scale
+#     divisor (0.41/0.27/0.28/0.35), so the depth priors disagreed and ATE rose to
+#     0.103. The scale-sync rescales every refresh keyframe's DUSt3R depth to the
+#     current rendered map depth (globally scale-consistent, anchored at
+#     bootstrap) via a robust median ratio, making the priors mutually consistent.
+#
+# Result: ATE 0.084 (vs 0.103 without scale-sync), with early-frame ATE ~0.020
+# (better than the 0.024 baseline). See DUST3R_DIAGNOSIS_REPORT.md.
+inherit_from: "configs/mono/tum/ablations/fr1_desk_04c_dust3r_fixed.yaml"
+
+Training:
+  dust3r:
+    # Active multiview refresh so more keyframes carry a DUSt3R depth prior.
+    refresh:
+      enabled: True
+      force_after_bootstrap: True
+      min_frame_gap: 25
+      min_keyframe_gap: 2
+      max_calls: 8
+      min_opacity_coverage: 0.25
+      max_tracking_loss_ratio: 1.5
+      max_depth_change_ratio: 1.5
+      min_visible_gaussian_ratio: 0.05
+      min_baseline: 0.12
+      max_baseline: 1.20
+      target_baseline: 0.30
+    # DUSt3R depth as a pose prior in tracking + mapping (conservative weights;
+    # RGB stays the dominant signal).
+    depth_prior:
+      enabled: True
+      tracking_weight: 0.1
+      mapping_weight: 0.1
+      min_conf: 0.0
+      opacity_threshold: 0.5
+      # Cross-keyframe scale synchronization: anchor each refresh keyframe's
+      # DUSt3R depth to the rendered map depth so all priors share one SLAM scale.
+      sync_scale:
+        enabled: True
+        opacity_threshold: 0.5
+        min_pixels: 2000
+        min_ratio: 0.25
+        max_ratio: 4.0

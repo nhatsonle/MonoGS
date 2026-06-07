@@ -53,10 +53,63 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
     return err
 
 
+def _dust3r_depth_prior_cfg(config):
+    """Read the DUSt3R depth-prior loss settings (disabled by default)."""
+    dcfg = config["Training"].get("dust3r", {}).get("depth_prior", {})
+    return {
+        "enabled": bool(dcfg.get("enabled", False)),
+        "tracking_weight": float(dcfg.get("tracking_weight", 0.0)),
+        "mapping_weight": float(dcfg.get("mapping_weight", 0.0)),
+        "min_conf": float(dcfg.get("min_conf", 0.0)),
+        "opacity_threshold": float(dcfg.get("opacity_threshold", 0.5)),
+    }
+
+
+def get_loss_depth_prior(depth, opacity, viewpoint, min_conf=0.0, opacity_threshold=0.5):
+    """L1 between rendered depth and the DUSt3R depth prior stored on viewpoint.
+
+    Mirrors the RGB-D depth term but uses DUSt3R depth (set at bootstrap/refresh
+    keyframes) as the pseudo-GT. Only well-rendered, confident pixels contribute,
+    so this nudges pose toward the DUSt3R geometry without overriding RGB.
+    Returns None when no usable DUSt3R depth is available.
+    """
+    prior = getattr(viewpoint, "dust3r_depth", None)
+    if prior is None:
+        return None
+    if not torch.is_tensor(prior):
+        prior = torch.from_numpy(prior)
+    prior = prior.to(dtype=depth.dtype, device=depth.device).view(*depth.shape)
+
+    valid = torch.isfinite(prior) & (prior > 0.01)
+    valid = valid & (opacity.view(*depth.shape) > opacity_threshold)
+    conf = getattr(viewpoint, "dust3r_depth_conf", None)
+    if conf is not None and min_conf > 0.0:
+        if not torch.is_tensor(conf):
+            conf = torch.from_numpy(conf)
+        conf = conf.to(dtype=depth.dtype, device=depth.device).view(*depth.shape)
+        valid = valid & (conf >= min_conf)
+    if valid.count_nonzero() == 0:
+        return None
+    l1_depth = torch.abs(depth - prior)[valid]
+    return l1_depth.mean()
+
+
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False):
     image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
-        return get_loss_tracking_rgb(config, image_ab, depth, opacity, viewpoint)
+        loss = get_loss_tracking_rgb(config, image_ab, depth, opacity, viewpoint)
+        dcfg = _dust3r_depth_prior_cfg(config)
+        if dcfg["enabled"] and dcfg["tracking_weight"] > 0.0:
+            depth_loss = get_loss_depth_prior(
+                depth,
+                opacity,
+                viewpoint,
+                min_conf=dcfg["min_conf"],
+                opacity_threshold=dcfg["opacity_threshold"],
+            )
+            if depth_loss is not None:
+                loss = loss + dcfg["tracking_weight"] * depth_loss
+        return loss
     return get_loss_tracking_rgbd(config, image_ab, depth, opacity, viewpoint)
 
 
@@ -94,7 +147,19 @@ def get_loss_mapping(config, image, depth, viewpoint, opacity, initialization=Fa
     else:
         image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
-        return get_loss_mapping_rgb(config, image_ab, depth, viewpoint)
+        loss = get_loss_mapping_rgb(config, image_ab, depth, viewpoint)
+        dcfg = _dust3r_depth_prior_cfg(config)
+        if dcfg["enabled"] and dcfg["mapping_weight"] > 0.0:
+            depth_loss = get_loss_depth_prior(
+                depth,
+                opacity,
+                viewpoint,
+                min_conf=dcfg["min_conf"],
+                opacity_threshold=dcfg["opacity_threshold"],
+            )
+            if depth_loss is not None:
+                loss = loss + dcfg["mapping_weight"] * depth_loss
+        return loss
     return get_loss_mapping_rgbd(config, image_ab, depth, viewpoint)
 
 

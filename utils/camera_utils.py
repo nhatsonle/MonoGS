@@ -36,6 +36,12 @@ class Camera(nn.Module):
         self.original_image = color
         self.depth = depth
         self.grad_mask = None
+        # DUSt3R depth prior (metric-scaled, same convention as self.depth) set
+        # at bootstrap/refresh keyframes. Used as a pseudo-GT depth in the
+        # monocular tracking/mapping loss so DUSt3R can constrain pose, not just
+        # insert Gaussians. None when no DUSt3R depth is available for this frame.
+        self.dust3r_depth = None
+        self.dust3r_depth_conf = None
 
         self.fx = fx
         self.fy = fy
@@ -145,6 +151,8 @@ class Camera(nn.Module):
     def clean(self):
         self.original_image = None
         self.depth = None
+        self.dust3r_depth = None
+        self.dust3r_depth_conf = None
         self.grad_mask = None
 
         self.cam_rot_delta = None

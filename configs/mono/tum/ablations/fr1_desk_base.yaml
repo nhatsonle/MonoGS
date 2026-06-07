@@ -1,0 +1,25 @@
+# Base for fr1/desk ablations.
+# Reuses the fr3_office ablation base (which carries the full dust3r/lifecycle/
+# insertion/eval settings) but overrides the dataset path and calibration for
+# the fr1/desk sequence. fr1/desk is a harder monocular sequence than fr3/office
+# (fast rotation, motion blur, wider baselines), so it has more headroom for the
+# DUSt3R depth prior to help.
+inherit_from: "configs/mono/tum/fr3_office.yaml"
+
+Dataset:
+  dataset_path: "datasets/tum/rgbd_dataset_freiburg1_desk/"
+  num_frames: -1
+  Calibration:
+    fx: 517.306408
+    fy: 516.469215
+    cx: 318.643040
+    cy: 255.313989
+    k1: 0.262383
+    k2: -0.953104
+    p1: -0.005358
+    p2: 0.002628
+    k3: 1.163314
+    width: 640
+    height: 480
+    depth_scale: 5000.0
+    distorted: True

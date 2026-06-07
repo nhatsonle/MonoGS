@@ -1,0 +1,14 @@
+# Baseline MonoGS monocular on fr1/desk (no DUSt3R, no lifecycle).
+# Mirror of fr3_office_00_monogs.yaml but for the harder fr1/desk sequence.
+# fr1/desk has only 613 frames, so we run the full sequence (num_frames: -1)
+# instead of the 200-frame cap used on the longer fr3/office sequence.
+inherit_from: "configs/mono/tum/ablations/fr1_desk_base.yaml"
+
+Training:
+  lifecycle:
+    enabled: False
+  dust3r:
+    enabled: False
+  mapping_itr_num: 80
+Dataset:
+  num_frames: 200
