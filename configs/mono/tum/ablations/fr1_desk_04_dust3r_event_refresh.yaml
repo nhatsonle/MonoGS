@@ -1,0 +1,11 @@
+inherit_from: "configs/mono/tum/fr1_desk.yaml"
+
+# Config 04 — DUSt3R single-view init + event-driven refresh, on TUM freiburg1_desk.
+# Same shared tuning as fr3_office_04 via the "event_refresh" preset
+# (utils/config_presets.py); only the dataset/calibration differ (inherited from
+# fr1_desk.yaml).
+preset: event_refresh
+Training:
+  mapping_itr_num: 150
+  lifecycle:
+    enabled: False

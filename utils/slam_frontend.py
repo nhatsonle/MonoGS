@@ -274,6 +274,86 @@ class FrontEnd(mp.Process):
         )
         self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
         self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
+        # Weighted-health-score refresh trigger. The four health signals are
+        # fused into a single normalized "ill-health" score; a refresh fires when
+        # the score reaches `threshold`. Each signal is normalized so its
+        # threshold maps to a severity of 1.0. This is the only refresh-trigger
+        # mechanism (the legacy per-signal OR logic has been removed).
+        health_score = dust3r_refresh.get("health_score", {})
+        self.dust3r_refresh_health_score_threshold = float(
+            health_score.get("threshold", 1.0)
+        )
+        default_weights = {
+            "opacity_coverage": 1.0,
+            "visible_ratio": 1.0,
+            "loss_ratio": 1.0,
+            "depth_ratio": 1.0,
+        }
+        cfg_weights = health_score.get("weights", {})
+        self.dust3r_refresh_health_score_weights = {
+            key: float(cfg_weights.get(key, val))
+            for key, val in default_weights.items()
+        }
+
+    def dust3r_refresh_health_score(self, health):
+        """Fuse the four tracking-health signals into one ill-health score.
+
+        Each signal is mapped to a per-signal severity that is 0 while healthy
+        and rises to exactly 1.0 at its legacy threshold (a linear ramp from a
+        healthy anchor to the threshold), continuing past 1.0 as the value gets
+        worse:
+          - opacity_coverage / visible_ratio: lower is worse. Healthy anchor is
+            the value being at/above the floor (severity 0); severity reaches 1.0
+            when the value collapses to 0 (i.e. fraction below the floor).
+          - loss_ratio / depth_ratio: higher is worse. Healthy anchor is the
+            nominal ratio of 1.0 (no change); severity reaches 1.0 at the ceiling.
+        Severities are combined as a *weighted sum* (not average). With the
+        default weights of 1.0 this means:
+          - a single signal at its legacy threshold -> score 1.0 (matches the old
+            OR behaviour exactly when threshold=1.0);
+          - several sub-threshold signals accumulate and can cross 1.0 together,
+            which the discrete OR logic would have missed.
+        Returns the total score and the per-signal weighted contributions (for
+        logging and for attributing the trigger reason).
+        """
+        eps = 1e-8
+
+        def below_floor(value, floor):
+            # 0 when value >= floor (healthy), 1.0 when value == 0 (fully dead),
+            # linear in between. Stays at 1.0 floor of severity (can't exceed 1).
+            if floor <= eps:
+                return 0.0
+            return min(1.0, max(0.0, (floor - float(value)) / floor))
+
+        def above_ceiling(value, ceiling, healthy=1.0):
+            # 0 at the healthy ratio (1.0), 1.0 at the ceiling, grows beyond.
+            span = ceiling - healthy
+            if span <= eps:
+                return 0.0
+            return max(0.0, (float(value) - healthy) / span)
+
+        contributions = {
+            "opacity_coverage": below_floor(
+                health["opacity_coverage"],
+                self.dust3r_refresh_min_opacity_coverage,
+            ),
+            "visible_ratio": below_floor(
+                health["visible_ratio"],
+                self.dust3r_refresh_min_visible_gaussian_ratio,
+            ),
+            "loss_ratio": above_ceiling(
+                health["loss_ratio"],
+                self.dust3r_refresh_max_tracking_loss_ratio,
+            ),
+            "depth_ratio": above_ceiling(
+                health["depth_ratio"],
+                self.dust3r_refresh_max_depth_change_ratio,
+            ),
+        }
+        weights = self.dust3r_refresh_health_score_weights
+        weighted = {k: contributions[k] * weights[k] for k in contributions}
+        score = sum(weighted.values())
+        return score, weighted
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -854,14 +934,25 @@ class FrontEnd(mp.Process):
         if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
             return False, None
 
-        if health["opacity_coverage"] < self.dust3r_refresh_min_opacity_coverage:
-            return True, "low_opacity_coverage"
-        if health["visible_ratio"] < self.dust3r_refresh_min_visible_gaussian_ratio:
-            return True, "low_visible_gaussian_ratio"
-        if health["loss_ratio"] > self.dust3r_refresh_max_tracking_loss_ratio:
-            return True, "tracking_loss_spike"
-        if health["depth_ratio"] > self.dust3r_refresh_max_depth_change_ratio:
-            return True, "depth_distribution_shift"
+        score, contributions = self.dust3r_refresh_health_score(health)
+        if score >= self.dust3r_refresh_health_score_threshold:
+            # Attribute the trigger to the signal contributing the most.
+            reason_signal = max(contributions, key=contributions.get)
+            reason_map = {
+                "opacity_coverage": "low_opacity_coverage",
+                "visible_ratio": "low_visible_gaussian_ratio",
+                "loss_ratio": "tracking_loss_spike",
+                "depth_ratio": "depth_distribution_shift",
+            }
+            Log(
+                f"DUSt3R refresh health score {score:.3f} >= "
+                f"{self.dust3r_refresh_health_score_threshold:.3f} "
+                f"(opacity={contributions['opacity_coverage']:.3f}, "
+                f"visible={contributions['visible_ratio']:.3f}, "
+                f"loss={contributions['loss_ratio']:.3f}, "
+                f"depth={contributions['depth_ratio']:.3f})"
+            )
+            return True, reason_map[reason_signal]
         return False, None
 
     def prepare_dust3r_refresh_payload(self, cur_frame_idx, reason):

@@ -1,4 +1,8 @@
+import copy
+
 import yaml
+
+from utils.config_presets import get_preset
 
 
 def load_config(path, default_path=None):
@@ -26,6 +30,15 @@ def load_config(path, default_path=None):
             cfg = yaml.full_load(f)
     else:
         cfg = dict()
+
+    # Apply named preset(s) below this file's own keys, so explicit YAML values
+    # still override the preset, while the preset overrides the inherited chain.
+    presets = cfg_special.get("preset")
+    if presets is not None:
+        if isinstance(presets, str):
+            presets = [presets]
+        for name in presets:
+            update_recursive(cfg, copy.deepcopy(get_preset(name)))
 
     # merge per dataset cfg. and main cfg.
     update_recursive(cfg, cfg_special)

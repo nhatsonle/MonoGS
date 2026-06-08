@@ -458,6 +458,12 @@ class GaussianModel:
 
         points = points * (1.0 / scale)
 
+        if "adaptive_pointsize" in self.config["Dataset"]:
+            if self.config["Dataset"]["adaptive_pointsize"]:
+                median_depth = float(np.median(points[..., 2]))
+                if np.isfinite(median_depth) and median_depth > 0:
+                    point_size = min(0.05, point_size * median_depth)
+
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
         pcd.colors = o3d.utility.Vector3dVector(colors)
@@ -688,19 +694,24 @@ class GaussianModel:
         colors_img = cam.original_image.permute(1, 2, 0).detach().cpu()
         colors = colors_img[ys, xs].float().to(device="cuda")
 
-        if max_points > 0 and fused_point_cloud.shape[0] > max_points:
-            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:max_points]
-            fused_point_cloud = fused_point_cloud[perm]
-            colors = colors[perm]
-            z = z.to(device="cuda")[perm]
-        elif sample_stride <= 1 and downsample_factor > 1 and fused_point_cloud.shape[0] > downsample_factor:
+        z = z.to(device="cuda")
+        # Apply downsampling first so pcd_downsample is always honoured, then use
+        # max_points only as a final safety cap on top of the downsampled cloud.
+        if (
+            sample_stride <= 1
+            and downsample_factor > 1
+            and fused_point_cloud.shape[0] > downsample_factor
+        ):
             keep_count = max(1, fused_point_cloud.shape[0] // downsample_factor)
             perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:keep_count]
             fused_point_cloud = fused_point_cloud[perm]
             colors = colors[perm]
-            z = z.to(device="cuda")[perm]
-        else:
-            z = z.to(device="cuda")
+            z = z[perm]
+        if max_points > 0 and fused_point_cloud.shape[0] > max_points:
+            perm = torch.randperm(fused_point_cloud.shape[0], device="cuda")[:max_points]
+            fused_point_cloud = fused_point_cloud[perm]
+            colors = colors[perm]
+            z = z[perm]
 
         pcd_obj = BasicPointCloud(
             points=fused_point_cloud.detach().cpu().numpy(),
