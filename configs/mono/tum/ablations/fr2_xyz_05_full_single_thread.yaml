@@ -1,0 +1,22 @@
+inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
+
+# Full proposed method on fr2_xyz, run in SINGLE-THREAD mode.
+# Inherits the complete config-04 system (all three improvements enabled):
+#   1. DUSt3R depth prior (frame-0 bootstrap + event-refresh insertion)
+#   2. Weighted-score event selection for when to call DUSt3R
+#   3. DUSt3R pointmap scale synchronization (baseline_ratio + pointmap_sync)
+#
+# Single-thread mode runs the frontend (tracking) and backend (mapping) in a
+# deterministic serialized loop instead of the default asynchronous two-process
+# pipeline. This removes GPU-utilisation randomness between runs, so the result
+# is reproducible — at the cost of FPS (every keyframe runs mapping_itr_num
+# mapping iterations inline before the next frame is tracked).
+#
+# The flag must be set in BOTH blocks: the frontend reads Training.single_thread
+# and the backend reads Dataset.single_thread.
+
+Dataset:
+  single_thread: True
+
+Training:
+  single_thread: True

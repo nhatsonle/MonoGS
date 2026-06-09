@@ -4,6 +4,10 @@ Results:
   use_gui: False
   eval_rendering: True
   color_refinement: False
+  # Short result-folder name. The dataset folder is
+  # rgbd_dataset_freiburg3_long_office_household, so without this override the
+  # auto-derived name would be the full long form.
+  save_name: "tum_rgbd_dataset_freiburg3_office"
 
 
 Training:

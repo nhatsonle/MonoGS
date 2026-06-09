@@ -1,4 +1,3 @@
-python slam.py --config configs/mono/tum/fr3_office.yaml
-python slam.py --config configs/mono/tum/fr1_desk.yaml
-python slam.py --config configs/mono/tum/fr2_xyz.yaml
-
+python slam.py --config configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml
+python slam.py --config configs/mono/tum/ablations/fr1_desk_04_dust3r_event_refresh.yaml
+python slam.py --config configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml

@@ -1,0 +1,12 @@
+inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
+
+# Leave-one-out ablation (fr2_xyz) — Improvement 1 removed.
+# Disable the DUSt3R depth prior entirely (bootstrap + refresh insertion).
+# Frame-0 falls back to MonoGS monocular pseudo-depth, and no DUSt3R geometry is
+# ever inserted. This isolates the contribution of DUSt3R-derived depth against
+# the MonoGS baseline pseudo-depth. With DUSt3R off, the event selection and
+# pointmap scale mechanisms have nothing to act on.
+
+Training:
+  dust3r:
+    enabled: False

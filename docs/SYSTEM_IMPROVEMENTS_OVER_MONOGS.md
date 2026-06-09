@@ -10,9 +10,13 @@ Config 04 inherits from the MonoGS baseline config and keeps the normal MonoGS
 tracking, local mapping, keyframe window, and bundle-adjustment flow. The active
 algorithmic changes over the original monocular MonoGS baseline are:
 
-1. DUSt3R depth bootstrap and event refresh
-2. DUSt3R pointmap scale synchronization
-3. Online Gaussian lifecycle controller
+1. DUSt3R depth prior (bootstrap + event refresh insertion)
+2. Weighted-score event selection for when to call DUSt3R
+3. DUSt3R pointmap scale synchronization
+
+These are the three contributions evaluated in the ablation study. The system no
+longer uses a Gaussian lifecycle controller; that path is disabled
+(`Training.lifecycle.enabled: False`) and is not part of the proposed method.
 
 ### Config Layout (preset)
 
@@ -31,15 +35,15 @@ values applied by the preset; opening the config file will only show the
 `preset:` line plus any scene-specific overrides. The same preset is reused for
 other TUM sequences (`fr1_desk_04_dust3r_event_refresh.yaml`,
 `fr2_xyz_04_dust3r_event_refresh.yaml`), which differ only in dataset
-path/calibration. All DUSt3R/lifecycle parameters are sequence-independent for
-TUM because the scale-normalization mechanisms (Section 2) absorb per-scene
-scale differences.
+path/calibration. All DUSt3R parameters are sequence-independent for TUM because
+the scale-normalization mechanisms (Section 3) absorb per-scene scale
+differences.
 
 Evaluation logging for Gaussian count, model memory, optimizer memory, and CUDA
-memory is also kept because it is needed to measure the lifecycle effect. It is
-not an algorithmic change to SLAM behavior.
+memory is also kept because it is needed to measure map size and runtime memory.
+It is not an algorithmic change to SLAM behavior.
 
-## 1. DUSt3R Depth Bootstrap And Event Refresh
+## 1. DUSt3R Depth Prior (Bootstrap And Refresh Insertion)
 
 Config 04 uses DUSt3R as a sparse online depth-prior source. It does not use
 DUSt3R for tracking, and it does not directly initialize Gaussians from DUSt3R
@@ -59,32 +63,18 @@ Training:
       mode: "single_view"
       fallback_to_depth: False
       only: True
-      prior_only: False
       backproject_depth: True
       use_confidence_mask: False
-      fill_invalid_depth: False
       depth_scale:
         enabled: True
-        mode: "median"
-        target_median: 2.0
-        min_scale: 0.25
-        max_scale: 4.0
     refresh:
       enabled: True
-      backproject_depth: True
-      force_after_bootstrap: True
       min_frame_gap: 50
       min_keyframe_gap: 3
       candidate_pool: 6
       min_baseline: 0.08
       max_baseline: 1.20
       target_baseline: 0.30
-      min_opacity_coverage: 0.12
-      opacity_threshold: 0.25
-      max_tracking_loss_ratio: 2.2
-      max_depth_change_ratio: 2.0
-      min_visible_gaussian_ratio: 0.01
-      ema_decay: 0.95
       max_calls: 3
 ```
 
@@ -123,19 +113,35 @@ safety cap. With `pcd_downsample: 32` the frame-0 map lands at roughly the same
 order of magnitude as the MonoGS baseline (~10k Gaussians at 640x480) instead of
 hitting the 200k cap. The same downsample path is used for refresh keyframes.
 
-### Event Refresh
+### Refresh Insertion
 
-After initialization, DUSt3R is not called for every keyframe. The frontend
-monitors simple map-health signals and requests a DUSt3R refresh only when the
-current map appears weak for the current view.
+After initialization, DUSt3R is not called for every keyframe. The decision of
+*when* to call it is the weighted-score event selection of Section 2; this
+section covers how an accepted refresh payload is inserted.
 
-Refresh triggers include:
+Accepted refresh payloads are inserted through the same depth-backprojection
+path: use DUSt3R pointmap z as depth, scale it into the SLAM map scale
+(Section 3), then backproject with the SLAM camera intrinsics.
+
+Relevant files:
+
+- `utils/slam_frontend.py`
+- `utils/slam_backend.py`
+- `utils/dust3r_utils.py`
+
+## 2. Weighted-Score Event Selection
+
+DUSt3R inference is expensive (close to ~1 s per call with the large model).
+Calling it on every keyframe would collapse FPS, so the frontend decides when a
+DUSt3R refresh is worthwhile from cheap map-health signals computed from the
+current render.
+
+The four health signals are:
 
 - low opacity coverage
 - low visible-Gaussian ratio
 - tracking loss spike relative to the running average
 - large rendered-depth distribution change
-- one forced early multiview refresh after bootstrap
 
 These four signals are fused into a single normalized "ill-health" score (the
 legacy per-signal OR logic has been removed). Each signal is mapped to a severity
@@ -163,18 +169,24 @@ With `threshold: 1.0` and unit weights, a single signal at its threshold scores
 can also cross the threshold together. The per-signal `min_*/max_*` values from
 the refresh block are reused as the per-signal normalization points.
 
-Accepted refresh payloads are inserted through the same depth-backprojection
-path: use DUSt3R pointmap z as depth, scale it into the SLAM map scale, then
-backproject with the SLAM camera intrinsics.
+In addition to the weighted score, refreshes obey cooldown and budget limits so
+DUSt3R is never called too densely:
+
+```yaml
+min_frame_gap: 50
+min_keyframe_gap: 3
+max_calls: 3
+```
+
+One forced early multiview refresh after bootstrap (`force_after_bootstrap: True`)
+upgrades the single-view frame-0 depth with a higher-quality multiview pointmap
+once a suitable reference frame exists.
 
 Relevant files:
 
 - `utils/slam_frontend.py`
-- `utils/slam_backend.py`
-- `gaussian_splatting/scene/gaussian_model.py`
-- `utils/dust3r_utils.py`
 
-## 2. DUSt3R Pointmap Scale Synchronization
+## 3. DUSt3R Pointmap Scale Synchronization
 
 DUSt3R pointmaps have an arbitrary scale. Config 04 enables both a fallback
 baseline-ratio scale and synchronized pointmap scaling:
@@ -217,61 +229,6 @@ Relevant files:
 - `utils/slam_frontend.py`
 - `gaussian_splatting/scene/gaussian_model.py`
 
-## 3. Online Gaussian Lifecycle Controller
-
-Config 04 enables a conservative lifecycle controller for Gaussians:
-
-```yaml
-Training:
-  lifecycle:
-    enabled: True
-    newborn_grace: 10
-    stable_min_visibility: 5
-    cold_min_age: 80
-    cold_grad_threshold: 0.00001
-    cold_opacity_threshold: 0.5
-    bad_opacity_threshold: 0.02
-    bad_min_visibility: 0
-    bad_use_recent_visibility: False
-    bad_patience: 5
-    freeze_cold: False
-    suppress_cold_densify: False
-    prune_bad: True
-    prune_bad_local_only: True
-    protect_newborn_from_prune: False
-    log_interval: 10
-```
-
-The controller tracks four states:
-
-- `newborn`: recently inserted Gaussians inside the grace period
-- `stable`: visible Gaussians that remain normally trainable
-- `cold`: old, visible, low-gradient Gaussians
-- `bad`: persistently low-opacity Gaussians after the grace period
-
-The current config is intentionally conservative:
-
-- cold Gaussians are not frozen
-- cold Gaussians are not blocked from densification
-- newborn Gaussians are not protected from MonoGS' normal opacity pruning
-- bad pruning is restricted to MonoGS' local prune scope
-- recent invisibility alone does not make an old Gaussian bad
-
-This avoids the previous failure mode where valid old map Gaussians were pruned
-after the camera turned away from them, which could later distort the trajectory
-and move earlier good poses during backend optimization.
-
-Expected log:
-
-```text
-Lifecycle: newborn=... stable=... cold=... bad=... total=...
-```
-
-Relevant files:
-
-- `gaussian_splatting/scene/gaussian_model.py`
-- `utils/slam_backend.py`
-
 ## 4. Evaluation Logging
 
 Config 04 also benefits from extra evaluation logs used to compare map size and
@@ -288,8 +245,7 @@ Eval: CUDA max memory reserved [MB] ...
 ```
 
 `Final Gaussian model memory [MB]` counts persistent Gaussian tensors such as
-positions, SH features, opacity, scale, rotation, visibility buffers, and
-lifecycle buffers.
+positions, SH features, opacity, scale, rotation, and visibility buffers.
 
 `Final Gaussian optimizer state memory [MB]` counts Adam optimizer state tensors
 owned by the Gaussian optimizer.
@@ -307,6 +263,8 @@ Relevant file:
 The following experimental branches are intentionally not documented as config
 04 improvements:
 
+- the online Gaussian lifecycle controller (disabled; not part of the proposed
+  method)
 - direct DUSt3R pointmap XYZ Gaussian initialization
 - DUSt3R-to-MonoGS Sim3 alignment gate
 - DUSt3R-aware mapping-iteration scheduler from config 05
@@ -321,10 +279,12 @@ MonoGS.
 
 For config 04, the real improvements over baseline MonoGS are:
 
-- DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth.
-- DUSt3R is reused only as an event-triggered multiview depth refresh.
+- DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth, and the same
+  depth-prior path inserts geometry at event-triggered refreshes.
+- A weighted health score decides when DUSt3R is worth calling, instead of a
+  fixed per-keyframe schedule or discrete per-signal thresholds.
 - Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
-- The lifecycle controller conservatively prunes persistently low-opacity local
-  bad Gaussians and logs Gaussian states.
 - Extra final logs report Gaussian count, model memory, optimizer memory, and
   CUDA memory for evaluation.
+</content>
+</invoke>

@@ -1,0 +1,18 @@
+inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
+
+# Leave-one-out ablation (fr2_xyz) — Improvement 3 removed.
+# Keep the DUSt3R depth prior (bootstrap + event refresh) and the weighted-score
+# event selection, but disable both DUSt3R-to-SLAM scale mechanisms for multiview
+# refreshes (baseline-ratio fallback AND synchronized pointmap scaling). Refresh
+# depth is then inserted with scale divisor 1.0.
+#
+# Frame-0 single-view median depth normalization (init.depth_scale) stays
+# enabled: it is part of the DUSt3R-depth bootstrap path and there is no SLAM
+# baseline at frame 0, so it is unrelated to the pointmap scale-sync mechanism
+# being ablated here.
+
+Training:
+  dust3r:
+    scale:
+      baseline_ratio: False
+      pointmap_sync: False

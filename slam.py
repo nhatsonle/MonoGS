@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -111,7 +112,7 @@ class SLAM:
         def log_final_gaussian_stats(gaussians):
             if gaussians is None:
                 Log("Final Gaussian stats unavailable", tag="Eval")
-                return
+                return {}
 
             tensor_names = [
                 "_xyz",
@@ -150,35 +151,50 @@ class SLAM:
                             seen_tensors.add(id(value))
                             optimizer_mb += tensor_size_mb(value)
 
-            Log("Final Gaussian count", gaussians.get_xyz.shape[0], tag="Eval")
+            gaussian_count = int(gaussians.get_xyz.shape[0])
+            Log("Final Gaussian count", gaussian_count, tag="Eval")
             Log("Final Gaussian model memory [MB]", f"{model_mb:.2f}", tag="Eval")
             Log(
                 "Final Gaussian optimizer state memory [MB]",
                 f"{optimizer_mb:.2f}",
                 tag="Eval",
             )
+            return {
+                "gaussian_count": gaussian_count,
+                "model_size_mb": round(model_mb, 4),
+                "optimizer_state_mb": round(optimizer_mb, 4),
+            }
 
         def log_cuda_memory_stats():
+            mem = {
+                "cuda_memory_allocated_mb": torch.cuda.memory_allocated() / (1024 * 1024),
+                "cuda_memory_reserved_mb": torch.cuda.memory_reserved() / (1024 * 1024),
+                "cuda_max_memory_allocated_mb": torch.cuda.max_memory_allocated()
+                / (1024 * 1024),
+                "cuda_max_memory_reserved_mb": torch.cuda.max_memory_reserved()
+                / (1024 * 1024),
+            }
             Log(
                 "CUDA memory allocated [MB]",
-                f"{torch.cuda.memory_allocated() / (1024 * 1024):.2f}",
+                f"{mem['cuda_memory_allocated_mb']:.2f}",
                 tag="Eval",
             )
             Log(
                 "CUDA memory reserved [MB]",
-                f"{torch.cuda.memory_reserved() / (1024 * 1024):.2f}",
+                f"{mem['cuda_memory_reserved_mb']:.2f}",
                 tag="Eval",
             )
             Log(
                 "CUDA max memory allocated [MB]",
-                f"{torch.cuda.max_memory_allocated() / (1024 * 1024):.2f}",
+                f"{mem['cuda_max_memory_allocated_mb']:.2f}",
                 tag="Eval",
             )
             Log(
                 "CUDA max memory reserved [MB]",
-                f"{torch.cuda.max_memory_reserved() / (1024 * 1024):.2f}",
+                f"{mem['cuda_max_memory_reserved_mb']:.2f}",
                 tag="Eval",
             )
+            return {k: round(v, 4) for k, v in mem.items()}
 
         backend_process = mp.Process(target=self.backend.run)
         if self.use_gui:
@@ -272,8 +288,34 @@ class SLAM:
             save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
 
         final_gaussians = self.gaussians if self.eval_rendering else self.frontend.gaussians
-        log_final_gaussian_stats(final_gaussians)
-        log_cuda_memory_stats()
+        gaussian_stats = log_final_gaussian_stats(final_gaussians)
+        cuda_stats = log_cuda_memory_stats()
+
+        # Persist the non-rendering run metrics (timing / DUSt3R cost / map size /
+        # memory) to a JSON file next to the other results. eval_rendering only
+        # writes psnr/ssim/lpips; these complementary metrics live here.
+        if self.save_dir is not None:
+            total_time = start.elapsed_time(end) * 0.001
+            run_metrics = {
+                "fps": round(FPS, 4),
+                "total_time_s": round(total_time, 4),
+                "num_frames": N_frames,
+                "dust3r_calls": int(getattr(self.frontend, "dust3r_calls", 0)),
+                "dust3r_time_s": round(
+                    float(getattr(self.frontend, "dust3r_time", 0.0)), 4
+                ),
+                "gaussian_count": gaussian_stats.get("gaussian_count"),
+                "model_size_mb": gaussian_stats.get("model_size_mb"),
+                "optimizer_state_mb": gaussian_stats.get("optimizer_state_mb"),
+                "max_memory_usage_mb": cuda_stats.get("cuda_max_memory_allocated_mb"),
+                "cuda_max_memory_reserved_mb": cuda_stats.get(
+                    "cuda_max_memory_reserved_mb"
+                ),
+            }
+            metrics_path = os.path.join(self.save_dir, "run_metrics.json")
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(run_metrics, f, indent=4)
+            Log(f"Saved run metrics to {metrics_path}", tag="Eval")
 
         backend_queue.put(["stop"])
         backend_process.join()
@@ -318,9 +360,16 @@ if __name__ == "__main__":
     if config["Results"]["save_results"]:
         mkdir_p(config["Results"]["save_dir"])
         current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        path = config["Dataset"]["dataset_path"].split("/")
+        # Build the per-run folder name. An explicit Results.save_name wins;
+        # otherwise derive "<parent>_<dataset>" from the dataset path. normpath
+        # strips any trailing slash so the name is stable whether or not
+        # dataset_path ends in "/".
+        save_name = config["Results"].get("save_name")
+        if not save_name:
+            path = os.path.normpath(config["Dataset"]["dataset_path"]).split(os.sep)
+            save_name = path[-2] + "_" + path[-1]
         save_dir = os.path.join(
-            config["Results"]["save_dir"], path[-3] + "_" + path[-2], current_datetime
+            config["Results"]["save_dir"], save_name, current_datetime
         )
         tmp = args.config
         tmp = tmp.split(".")[0]
