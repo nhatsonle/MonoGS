@@ -47,14 +47,14 @@ The method demonstrates the first monocular SLAM solely based on 3D Gaussian Spl
 # Getting Started
 ## Installation
 ```
-git clone https://github.com/muskie82/MonoGS.git --recursive
+git clone https://github.com/nhatsonle/MonoGS.git --recursive
 cd MonoGS
 ```
 
-Setup the environment.
+Setup the environment.cd M
 
 > **Tested with Python 3.10, CUDA 11.x/12.x.**
-> Install `numpy==1.26.4` **first** — several C-extensions (OpenCV, quaternion) are compiled against NumPy 1.x ABI and will crash at runtime with NumPy 2.x.
+> This stack **must** run on NumPy 1.x. Several C-extensions (OpenCV, `numpy-quaternion`) are compiled against the NumPy 1.x ABI, and the data loaders use APIs removed in NumPy 2.0 (e.g. `np.unicode_`). NumPy 2.x will crash at runtime.
 
 ```bash
 apt-get update && apt-get install -y \
@@ -67,34 +67,56 @@ apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 ```
 
+The install is split into separate steps **on purpose**. Running every package in one giant
+`pip install` is fragile: if any single package fails to resolve, pip aborts the whole command and
+**none** of the later packages get installed (this is why `imgviz` or `torchmetrics` can silently
+go missing). A second package can also pull in NumPy 2.x and overwrite the pinned 1.26.4, leaving a
+broken install with two `numpy-*.dist-info` folders. The steps below prevent both problems.
+
 ```bash
-# Step 1: pin NumPy before anything else
-pip install numpy==1.26.4
+# Step 0: write a constraints file that hard-locks NumPy for EVERY later pip call.
+# This is the key fix — it stops any dependency from silently upgrading NumPy to 2.x.
+echo "numpy==1.26.4" > /tmp/monogs-constraints.txt
 
-# Step 2: core dependencies
-python -m pip install \
-    scipy matplotlib pandas networkx tqdm pyyaml ninja \
-    opencv-python==4.8.1.78 \
-    pycolmap einops evo plyfile==0.8.1 \
-    open3d trimesh roma \
-    numpy-quaternion==2023.0.2 \
-    lpips tensorboard wandb \
-    pyopengl pyrender \
-    huggingface-hub cvxpy munch glfw imgviz \
-    pyglm==2.7.1 \
-    torchmetrics==1.4.0.post0 \
-    gdown rich ruff \
-    "numpy==1.26.4"
+# Step 1: install the pinned NumPy first.
+pip install -c /tmp/monogs-constraints.txt numpy==1.26.4
 
-# Step 3: fix blinker conflict then reinstall open3d
-pip install open3d --ignore-installed blinker
+# Step 2: core dependencies, in small groups so a failure can't hide later packages.
+#   -c .../constraints.txt           -> NumPy can never be upgraded past 1.26.4
+#   --upgrade-strategy only-if-needed -> don't gratuitously bump already-satisfied deps
+PIP="python -m pip install -c /tmp/monogs-constraints.txt --upgrade-strategy only-if-needed"
+
+$PIP scipy matplotlib pandas networkx tqdm pyyaml ninja imgviz munch rich ruff gdown
+$PIP "opencv-python>=4.9" einops plyfile==0.8.1 trimesh roma
+$PIP numpy-quaternion==2023.0.2
+$PIP pycolmap evo lpips tensorboard wandb torchmetrics==1.4.0.post0
+$PIP pyopengl pyrender glfw pyglm==2.7.1
+$PIP huggingface-hub cvxpy
+$PIP open3d
+
+# Step 3: fix blinker conflict then reinstall open3d (still NumPy-locked)
+pip install -c /tmp/monogs-constraints.txt open3d --ignore-installed blinker
 
 # Step 4: submodules
-pip install submodules/simple-knn
-pip install submodules/diff-gaussian-rasterization
+pip install -c /tmp/monogs-constraints.txt submodules/simple-knn
+pip install -c /tmp/monogs-constraints.txt submodules/diff-gaussian-rasterization
+
+# Step 5: VERIFY the environment is healthy before running anything.
+# Expected: NumPy 1.26.4, exactly one numpy dist-info, and no missing modules.
+python -c "import numpy; assert numpy.__version__ == '1.26.4', numpy.__version__; print('numpy OK:', numpy.__version__)"
+ls -d "$(python -c 'import site; print(site.getsitepackages()[0])')"/numpy-*.dist-info   # should print exactly ONE line
+python -c "import imgviz, torchmetrics, pyrender, evo, lpips, open3d, cv2, quaternion; print('all imports OK')"
 ```
 
-> **Note:** `numpy-quaternion>=2024` requires `numpy>=1.25` and is incompatible with this stack — use `2023.0.2` as above.
+> **Notes**
+> - `numpy-quaternion>=2024` requires `numpy>=1.25` and is incompatible with this stack — use `2023.0.2` as above.
+> - If you ever see `AttributeError: np.unicode_ was removed` or a `ModuleNotFoundError`, your NumPy
+>   was upgraded to 2.x (often leaving two `numpy-*.dist-info` folders). Fix it by uninstalling NumPy
+>   **twice** (to clear both copies), then reinstalling the pin:
+>   ```bash
+>   pip uninstall -y numpy; pip uninstall -y numpy
+>   pip install numpy==1.26.4
+>   ```
 
 Compile the cuda kernels for RoPE (as in CroCo v2 and DUSt3R).
 ```bash
@@ -187,6 +209,21 @@ We tested the method with [Intel Realsense d455](https://www.mouser.co.uk/new/in
   </a>
 </p>
 
+# Troubleshooting
+
+## `cameraMatrix is not a numpy array` (cv2.initUndistortRectifyMap)
+
+**Cause:** `opencv-python<=4.8.x` is compiled against NumPy 1.x ABI and fails silently with NumPy 2.x, reporting every array as an invalid argument.
+
+**Fix:** upgrade OpenCV (not downgrade NumPy — other packages like `torch`, `open3d`, `scipy` may require NumPy 2.x):
+```bash
+pip install --upgrade "opencv-python>=4.9"
+```
+
+If you see this error alongside `scipy`/`torch` import failures due to NumPy version conflicts, the root cause is a mixed-version install. The safe combination for this repo is:
+- `numpy==1.26.4` + `opencv-python>=4.9` (OpenCV 4.9+ supports both NumPy 1.x and 2.x)
+- Do **not** mix `opencv-python==4.8.x` with `numpy>=2.0`
+
 # Evaluation
 <!-- To evaluate the method, please run the SLAM system with `save_results=True` in the base config file. This setting automatically outputs evaluation metrics in wandb and exports log files locally in save_dir. For benchmarking purposes, it is recommended to disable the GUI by setting `use_gui=False` in order to maximise GPU utilisation. For evaluating rendering quality, please set the `eval_rendering=True` flag in the configuration file. -->
 To evaluate our method, please add `--eval` to the command line argument:
@@ -220,7 +257,7 @@ If you found this code/work to be useful in your own research, please considerin
   title={{G}aussian {S}platting {SLAM}},
   author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
   booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2024}
+  year={2024}a
 }
 
 ```
