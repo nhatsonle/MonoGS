@@ -1,4 +1,4 @@
-# Phuong Phap De Xuat: MonoGS Voi DUSt3R Depth Prior, Weighted-Score Event Selection Va Pointmap Scale Sync
+# Phuong Phap De Xuat: MonoGS Voi DUSt3R Depth Prior, Adaptive Health-Score Event Selection Va Pointmap Scale Sync
 
 Tai lieu nay mo ta chi tiet co che hoat dong cua cau hinh:
 
@@ -27,7 +27,7 @@ co ba dong gop chinh, va day cung la ba thanh phan duoc danh gia trong ablation
 study:
 
 1. Co che su dung depth prior cua DUSt3R (bootstrap frame 0 + chen luc refresh).
-2. Co che lua chon su kien goi DUSt3R bang weighted health score.
+2. Co che lua chon su kien goi DUSt3R bang adaptive (tu chuan hoa) health score.
 3. Co che dong bo scale cua pointmap DUSt3R voi SLAM map.
 
 He thong van giu nguyen luong tracking, local mapping, keyframe window va bundle
@@ -43,7 +43,7 @@ Config 04 van xu ly tung frame theo thu tu thoi gian, khong su dung thong tin
 tuong lai cua dataset. Cac thanh phan chinh gom:
 
 1. Frontend: quan ly frame dau vao, tracking pose hien tai, chon keyframe va
-   quyet dinh khi nao can goi DUSt3R refresh (weighted-score event selection).
+   quyet dinh khi nao can goi DUSt3R refresh (adaptive health-score event selection).
 2. Backend: toi uu Gaussian map, thuc hien local mapping, bundle adjustment,
    densification va pruning.
 3. Gaussian map: bieu dien scene bang tap cac 3D Gaussian co vi tri, mau sac,
@@ -194,7 +194,7 @@ cua pointmap current duoc lay ra, dua qua co che scale sync (xem Cai tien 3),
 roi backproject thanh Gaussian moi bang intrinsics cua SLAM. Day la cach DUSt3R
 depth prior tham gia ca o init lan trong qua trinh chay.
 
-## 4. Cai Tien 2: Co Che Lua Chon Su Kien Goi DUSt3R (Weighted Health Score)
+## 4. Cai Tien 2: Co Che Lua Chon Su Kien Goi DUSt3R (Adaptive Health Score)
 
 ### 4.1. Ly Do Khong Goi DUSt3R Moi Keyframe
 
@@ -216,20 +216,63 @@ Frontend tinh cac chi so map-health tu render hien tai:
 - tracking loss ratio: tracking loss hien tai so voi EMA cua tracking loss;
 - depth ratio: thay doi median rendered depth so voi lan refresh truoc.
 
-### 4.3. Weighted Health Score
+### 4.3. Adaptive Health Score (Self-Normalizing)
 
-Bon tin hieu tren duoc gop thanh mot diem "ill-health" chuan hoa duy nhat (logic
-OR roi rac cu da duoc go bo hoan toan). Moi tin hieu duoc anh xa thanh mot
-severity = 0 khi khoe va = 1.0 tai nguong cua no, sau do cong co trong so;
-refresh duoc kich hoat khi tong dat `threshold`. Cach nay cho phep nhieu tin hieu
-cung duoi nguong nhung deu suy giam cong don lai de kich hoat, dieu ma logic OR
-roi rac bo sot. Ap dung qua preset `event_refresh`:
+Bon tin hieu tren duoc gop thanh mot diem "ill-health" chuan hoa duy nhat. Cach
+mac dinh hien tai la **adaptive (tu chuan hoa)**: thay vi so moi tin hieu voi mot
+nguong dat tay co dinh, he thong chuan hoa moi tin hieu theo *thong ke chay cua
+chinh no*, nen diem so tu thich nghi theo tung scene ma khong can nguong hay
+trong so dat tay.
+
+Moi frame, he thong cap nhat EMA cua mean va EMA cua mean-absolute-deviation
+(MAD) cho tung tin hieu. Gia tri hien tai cua moi tin hieu duoc bien thanh mot
+robust z-score so voi phan bo chay cua no, dinh huong sao cho "xau" luon la
+duong:
+
+```text
+scale_i = 1.4826 * MAD_i          # quy doi MAD -> sigma cho phan bo chuan
+z_i     = orient_i * (x_i - mean_i) / scale_i
+          # orient = -1 cho opacity_coverage / visible_ratio (thap la xau)
+          # orient = +1 cho loss_ratio / depth_ratio          (cao la xau)
+severity_i = sigmoid(z_i / temperature)         # thuoc (0, 1)
+score      = mean(severity_1 .. severity_4)     # thuoc (0, 1)
+```
+
+Vi score la trung binh khong trong so cua cac xac suat, no nam trong `(0, 1)` va
+`threshold` la xac suat ill-health truc tiep: `0.5` nghia la "bat thuong hon muc
+trung binh chay". **Khong con anchor hay trong so dat tay cho tung tin hieu.**
+Cho den khi tich luy du `warmup_updates` lan cap nhat, mean/MAD chay chua dang
+tin, nen score bi ep ve `0` (khong refresh). Ap dung qua preset `event_refresh`:
 
 ```yaml
 Training:
   dust3r:
     refresh:
       health_score:
+        mode: adaptive
+        threshold: 0.5          # xac suat ill-health; < 0.5 = nhay hon
+        stat_decay: 0.95        # EMA decay cho mean / MAD chay cua tung tin hieu
+        temperature: 1.0        # do mem cua sigmoid (nho hon = kich hoat sac hon)
+        warmup_updates: 8       # so frame truoc khi tin score (truoc do = 0)
+```
+
+Cach nay loai bo viec tinh chinh theo tung scene: cung gia tri tham so dung duoc
+cho fr1/fr2/fr3 vi moi tin hieu tu calibrate theo dai gia tri quan sat online.
+Ly do trigger van duoc gan cho tin hieu co severity lon nhat (dung de log).
+
+### 4.3b. Che Do Weighted Cu (mode: weighted — ablation/tuong thich)
+
+Cach cu duoc giu lai cho ablation va tuong thich nguoc. Moi tin hieu anh xa thanh
+severity = 0 khi khoe va = 1.0 tai mot anchor dat tay, sau do cong co trong so;
+refresh kich hoat khi tong dat `threshold`. Cac gia tri `min_*/max_*` trong block
+refresh duoc tai su dung lam anchor chuan hoa.
+
+```yaml
+Training:
+  dust3r:
+    refresh:
+      health_score:
+        mode: weighted
         threshold: 1.0          # < 1 = nhay hon, > 1 = bao thu hon
         weights:                # mac dinh 1.0 moi tin hieu
           opacity_coverage: 1.0
@@ -238,14 +281,13 @@ Training:
           depth_ratio: 1.0
 ```
 
-Voi `threshold: 1.0` va trong so don vi, mot tin hieu don dat nguong cho diem 1.0
-va kich hoat (khop voi bien OR cu), dong thoi cac tin hieu yeu cong don cung co
-the vuot nguong. Cac gia tri `min_*/max_*` trong block refresh duoc tai su dung
-lam diem chuan hoa cho tung tin hieu.
+Voi `threshold: 1.0` va trong so don vi, mot tin hieu don dat anchor cho diem 1.0
+va kich hoat, dong thoi cac tin hieu yeu cong don cung co the vuot nguong. Day la
+co che ma adaptive score thay the o vai tro mac dinh.
 
 ### 4.4. Gioi Han Tan Suat Goi DUSt3R
 
-Ngoai weighted score, refresh con phai thoa cac dieu kien cooldown va ngan sach
+Ngoai health score, refresh con phai thoa cac dieu kien cooldown va ngan sach
 de DUSt3R khong bao gio bi goi qua day:
 
 ```yaml
@@ -403,11 +445,11 @@ For each new frame t
   -> du doan pose tu frame truoc/constant velocity
   -> render Gaussian map
   -> toi uu pose bang RGB tracking loss
-  -> tinh map-health -> weighted health score
+  -> tinh map-health -> adaptive health score
   -> neu la keyframe:
        them vao local window
        backend local mapping + BA
-  -> neu weighted score >= threshold va qua cooldown:
+  -> neu health score >= threshold va qua cooldown:
        chon reference keyframe hop le
        DUSt3R(frame_t, frame_ref)
        pointmap scale synchronization
@@ -429,7 +471,8 @@ DUSt3R:
   init backproject_depth: True
   init median target depth: 2.0 m
   refresh enabled: True
-  refresh health_score threshold: 1.0
+  refresh health_score mode: adaptive
+  refresh health_score threshold: 0.5
   refresh max_calls: 3
   refresh min_frame_gap: 50
   refresh min_keyframe_gap: 3
@@ -456,7 +499,7 @@ So voi MonoGS monocular baseline, config 04 thay doi cac diem sau:
 | Khoi tao depth | pseudo-depth gan 2 m | DUSt3R single-view depth prior |
 | Frame dau | backproject pseudo-depth | backproject DUSt3R depth |
 | Refresh hinh hoc | khong co | event-triggered DUSt3R multiview depth |
-| Quyet dinh goi DUSt3R | khong co | weighted health score + cooldown |
+| Quyet dinh goi DUSt3R | khong co | adaptive health score + cooldown |
 | Dong bo scale | khong ap dung | baseline-ratio + pointmap sync |
 | Tracking | RGB photometric tracking | giu nguyen RGB photometric tracking |
 | Mapping | RGB local mapping/BA | giu nguyen RGB local mapping/BA |
@@ -472,7 +515,7 @@ Mot so han che can neu ro:
 
 - Single-view DUSt3R depth van can scale normalization ban dau.
 - DUSt3R inference ton chi phi lon, nen khong phu hop goi moi keyframe.
-- Event refresh phu thuoc vao nguong weighted health score; neu nguong qua bao
+- Event refresh phu thuoc vao nguong adaptive health score; neu nguong qua bao
   thu, he thong co the khong refresh khi can; neu qua nhay, FPS se giam.
 
 ## 11. Tom Tat Dong Gop
@@ -482,9 +525,11 @@ Phuong phap config 04 co the duoc tom tat thanh ba dong gop chinh:
 1. Co che su dung depth prior cua DUSt3R: thay pseudo-depth monocular bang
    DUSt3R-derived depth cho khoi tao Gaussian ngay tu frame dau tien, va tai su
    dung cung duong depth prior de chen hinh hoc luc refresh.
-2. Co che lua chon su kien goi DUSt3R bang weighted health score: gop bon tin
-   hieu map-health thanh mot diem chuan hoa de quyet dinh khi nao multiview
-   DUSt3R refresh la can thiet, thay cho lich co dinh hoac logic OR roi rac.
+2. Co che lua chon su kien goi DUSt3R bang adaptive (tu chuan hoa) health score:
+   chuan hoa moi tin hieu map-health theo thong ke chay cua chinh no (robust
+   z-score qua EMA mean/MAD) roi gop thanh mot xac suat ill-health de quyet dinh
+   khi nao multiview DUSt3R refresh la can thiet, thay cho lich co dinh, logic OR
+   roi rac, hay anchor/trong so dat tay. Che do weighted cu duoc giu lam ablation.
 3. Co che dong bo scale cua pointmap DUSt3R voi SLAM map (baseline-ratio +
    pointmap sync) de depth chen vao map dung scale.
 

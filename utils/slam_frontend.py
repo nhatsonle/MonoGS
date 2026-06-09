@@ -111,6 +111,16 @@ class FrontEnd(mp.Process):
         self.dust3r_first_refresh_done = False
         self.tracking_loss_ema = None
         self.last_dust3r_refresh_depth = None
+        # Adaptive (self-normalizing) health-score running statistics. Each of the
+        # four signals keeps an EMA mean and an EMA mean-absolute-deviation so the
+        # score is normalized per-scene without any hand-set anchor thresholds.
+        self.health_signal_keys = (
+            "opacity_coverage",
+            "visible_ratio",
+            "loss_ratio",
+            "depth_ratio",
+        )
+        self.reset_adaptive_health_stats()
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -280,8 +290,33 @@ class FrontEnd(mp.Process):
         # threshold maps to a severity of 1.0. This is the only refresh-trigger
         # mechanism (the legacy per-signal OR logic has been removed).
         health_score = dust3r_refresh.get("health_score", {})
+        # "adaptive": self-normalizing z-score score (default, no hand anchors).
+        # "weighted": legacy fixed weighted-sum, kept for ablation/compat.
+        self.dust3r_refresh_health_score_mode = str(
+            health_score.get("mode", "adaptive")
+        ).lower()
+        # The threshold is interpreted differently per mode, so pick a sensible
+        # default for each: adaptive scores live in (0, 1) (probability of
+        # ill-health, 0.5 = more anomalous than the running average), while the
+        # weighted sum uses 1.0 = a single signal at its legacy anchor.
+        default_threshold = (
+            0.5 if self.dust3r_refresh_health_score_mode == "adaptive" else 1.0
+        )
         self.dust3r_refresh_health_score_threshold = float(
-            health_score.get("threshold", 1.0)
+            health_score.get("threshold", default_threshold)
+        )
+        # Adaptive-mode knobs. All have safe defaults; none are scene-specific.
+        #   stat_decay  -> EMA decay for the per-signal running mean / MAD
+        #   temperature -> sigmoid softness on the z-score (smaller = sharper)
+        #   warmup      -> #updates before the score is trusted (else forced 0)
+        self.dust3r_refresh_health_score_stat_decay = float(
+            health_score.get("stat_decay", 0.95)
+        )
+        self.dust3r_refresh_health_score_temperature = float(
+            health_score.get("temperature", 1.0)
+        )
+        self.dust3r_refresh_health_score_warmup = int(
+            health_score.get("warmup_updates", 8)
         )
         default_weights = {
             "opacity_coverage": 1.0,
@@ -295,7 +330,96 @@ class FrontEnd(mp.Process):
             for key, val in default_weights.items()
         }
 
+    def reset_adaptive_health_stats(self):
+        """Clear the per-signal running statistics used by the adaptive score."""
+        self.health_signal_mean = {k: None for k in self.health_signal_keys}
+        self.health_signal_mad = {k: None for k in self.health_signal_keys}
+        self.health_stat_updates = 0
+
+    def update_adaptive_health_stats(self, health):
+        """Update the EMA mean / mean-absolute-deviation of each health signal.
+
+        Called once per tracked frame from ``update_tracking_health`` so the
+        statistics reflect the recent distribution of each signal. Robust
+        (median-like) MAD is used instead of variance because it is cheap to
+        maintain online and far less sensitive to the occasional spike that
+        also happens to be what we want to *detect* rather than absorb.
+        """
+        decay = float(np.clip(self.dust3r_refresh_health_score_stat_decay, 0.0, 0.999))
+        for key in self.health_signal_keys:
+            value = float(health[key])
+            mean = self.health_signal_mean[key]
+            if mean is None:
+                self.health_signal_mean[key] = value
+                self.health_signal_mad[key] = 0.0
+                continue
+            new_mean = decay * mean + (1.0 - decay) * value
+            abs_dev = abs(value - new_mean)
+            mad = self.health_signal_mad[key]
+            self.health_signal_mad[key] = decay * mad + (1.0 - decay) * abs_dev
+            self.health_signal_mean[key] = new_mean
+        self.health_stat_updates += 1
+
+    def dust3r_refresh_adaptive_health_score(self, health):
+        """Self-normalizing ill-health score with no hand-tuned anchors/weights.
+
+        Each signal is converted to a robust z-score against its own running
+        EMA mean / MAD, oriented so that "worse" is always positive:
+          - opacity_coverage / visible_ratio: lower is worse -> z = (mean - x)/scale
+          - loss_ratio / depth_ratio:          higher is worse -> z = (x - mean)/scale
+        where ``scale = 1.4826 * MAD`` (the MAD->sigma conversion for a normal
+        distribution). Each z-score is squashed through a sigmoid into a
+        severity in (0, 1) and the score is their *unweighted mean*, so the
+        score itself lives in (0, 1) and ``threshold`` is a direct probability
+        of ill-health (0.5 = "more anomalous than the running average").
+
+        Until ``warmup_updates`` statistics have accumulated the running mean /
+        MAD are not yet trustworthy, so the score is forced to 0 (no refresh)
+        and the per-signal contributions are reported as 0.
+        """
+        eps = 1e-8
+        temperature = max(self.dust3r_refresh_health_score_temperature, eps)
+        # "worse" direction per signal: +1 = higher is worse, -1 = lower is worse.
+        orientation = {
+            "opacity_coverage": -1.0,
+            "visible_ratio": -1.0,
+            "loss_ratio": 1.0,
+            "depth_ratio": 1.0,
+        }
+
+        def sigmoid(x):
+            return 1.0 / (1.0 + np.exp(-np.clip(x, -50.0, 50.0)))
+
+        contributions = {}
+        for key in self.health_signal_keys:
+            mean = self.health_signal_mean[key]
+            mad = self.health_signal_mad[key]
+            if mean is None:
+                contributions[key] = 0.0
+                continue
+            scale = 1.4826 * float(mad) + eps
+            z = orientation[key] * (float(health[key]) - mean) / scale
+            contributions[key] = float(sigmoid(z / temperature))
+
+        if self.health_stat_updates < self.dust3r_refresh_health_score_warmup:
+            score = 0.0
+            contributions = {k: 0.0 for k in self.health_signal_keys}
+        else:
+            score = float(np.mean([contributions[k] for k in self.health_signal_keys]))
+        return score, contributions
+
     def dust3r_refresh_health_score(self, health):
+        """Dispatch to the configured health-score formulation.
+
+        ``adaptive`` (default) is the self-normalizing z-score score that needs
+        no per-signal anchors or weights. ``weighted`` is the legacy fixed
+        weighted-sum kept for backward compatibility / ablation.
+        """
+        if self.dust3r_refresh_health_score_mode == "adaptive":
+            return self.dust3r_refresh_adaptive_health_score(health)
+        return self.dust3r_refresh_weighted_health_score(health)
+
+    def dust3r_refresh_weighted_health_score(self, health):
         """Fuse the four tracking-health signals into one ill-health score.
 
         Each signal is mapped to a per-signal severity that is 0 while healthy
@@ -441,6 +565,7 @@ class FrontEnd(mp.Process):
             self.dust3r_first_refresh_done = False
             self.tracking_loss_ema = None
             self.last_dust3r_refresh_depth = None
+            self.reset_adaptive_health_stats()
 
     def should_use_dust3r_initialization(self):
         return (
@@ -888,7 +1013,7 @@ class FrontEnd(mp.Process):
                 self.last_dust3r_refresh_depth / median_depth,
             )
 
-        return {
+        health = {
             "tracking_loss": tracking_loss,
             "loss_ratio": loss_ratio,
             "opacity_coverage": opacity_coverage,
@@ -896,6 +1021,11 @@ class FrontEnd(mp.Process):
             "median_depth": median_depth,
             "depth_ratio": depth_ratio,
         }
+        # Feed the adaptive score's running statistics every tracked frame so
+        # they reflect the recent per-scene distribution of each signal. The
+        # weighted (legacy) mode ignores these, so the update is harmless there.
+        self.update_adaptive_health_stats(health)
+        return health
 
     def should_trigger_dust3r_refresh(self, cur_frame_idx, health):
         if (
@@ -945,8 +1075,8 @@ class FrontEnd(mp.Process):
                 "depth_ratio": "depth_distribution_shift",
             }
             Log(
-                f"DUSt3R refresh health score {score:.3f} >= "
-                f"{self.dust3r_refresh_health_score_threshold:.3f} "
+                f"DUSt3R refresh health score [{self.dust3r_refresh_health_score_mode}] "
+                f"{score:.3f} >= {self.dust3r_refresh_health_score_threshold:.3f} "
                 f"(opacity={contributions['opacity_coverage']:.3f}, "
                 f"visible={contributions['visible_ratio']:.3f}, "
                 f"loss={contributions['loss_ratio']:.3f}, "

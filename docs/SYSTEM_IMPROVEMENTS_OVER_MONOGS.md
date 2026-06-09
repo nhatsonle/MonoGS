@@ -11,7 +11,8 @@ tracking, local mapping, keyframe window, and bundle-adjustment flow. The active
 algorithmic changes over the original monocular MonoGS baseline are:
 
 1. DUSt3R depth prior (bootstrap + event refresh insertion)
-2. Weighted-score event selection for when to call DUSt3R
+2. Adaptive (self-normalizing) health-score event selection for when to call
+   DUSt3R
 3. DUSt3R pointmap scale synchronization
 
 These are the three contributions evaluated in the ablation study. The system no
@@ -116,7 +117,7 @@ hitting the 200k cap. The same downsample path is used for refresh keyframes.
 ### Refresh Insertion
 
 After initialization, DUSt3R is not called for every keyframe. The decision of
-*when* to call it is the weighted-score event selection of Section 2; this
+*when* to call it is the adaptive health-score event selection of Section 2; this
 section covers how an accepted refresh payload is inserted.
 
 Accepted refresh payloads are inserted through the same depth-backprojection
@@ -129,7 +130,7 @@ Relevant files:
 - `utils/slam_backend.py`
 - `utils/dust3r_utils.py`
 
-## 2. Weighted-Score Event Selection
+## 2. Adaptive (Self-Normalizing) Health-Score Event Selection
 
 DUSt3R inference is expensive (close to ~1 s per call with the large model).
 Calling it on every keyframe would collapse FPS, so the frontend decides when a
@@ -143,19 +144,65 @@ The four health signals are:
 - tracking loss spike relative to the running average
 - large rendered-depth distribution change
 
-These four signals are fused into a single normalized "ill-health" score (the
-legacy per-signal OR logic has been removed). Each signal is mapped to a severity
-that is 0 while healthy and 1.0 at its threshold, then summed (weighted); a
-refresh fires when the total reaches `threshold`. This lets several
-sub-threshold-but-degraded signals accumulate and trigger together, which the
-old discrete OR logic would miss. Config 04 applies it via the `event_refresh`
-preset:
+These four signals are fused into a single normalized "ill-health" score. The
+default formulation is **adaptive (self-normalizing)**: instead of comparing each
+signal to a hand-set anchor, each signal is normalized against its *own running
+statistics*, so the score adapts per-scene with no manual thresholds or weights.
+
+### Adaptive score (default, `mode: adaptive`)
+
+Each tracked frame updates a running EMA mean and EMA mean-absolute-deviation
+(MAD) for each of the four signals. A signal's current value is then turned into
+a robust z-score against its own running distribution, oriented so that "worse"
+is always positive:
+
+```text
+scale_i = 1.4826 * MAD_i          # MAD -> sigma for a normal distribution
+z_i     = orient_i * (x_i - mean_i) / scale_i
+          # orient = -1 for opacity_coverage / visible_ratio (lower is worse)
+          # orient = +1 for loss_ratio / depth_ratio          (higher is worse)
+severity_i = sigmoid(z_i / temperature)         # in (0, 1)
+score      = mean(severity_1 .. severity_4)     # in (0, 1)
+```
+
+Because the score is an unweighted mean of probabilities, it lives in `(0, 1)`
+and `threshold` is a direct probability of ill-health: `0.5` means "more
+anomalous than the running average". There are **no per-signal anchors and no
+per-signal weights** to tune. Until `warmup_updates` statistics have accumulated
+the running mean/MAD are not yet trustworthy, so the score is forced to `0` (no
+refresh). Config 04 applies it via the `event_refresh` preset:
 
 ```yaml
 Training:
   dust3r:
     refresh:
       health_score:
+        mode: adaptive
+        threshold: 0.5          # probability of ill-health; <0.5 = more sensitive
+        stat_decay: 0.95        # EMA decay for the per-signal running mean / MAD
+        temperature: 1.0        # sigmoid softness (smaller = sharper trigger)
+        warmup_updates: 8       # frames before the score is trusted (else 0)
+```
+
+This removes the scene-specific tuning of the old approach: the same metric
+values work across fr1/fr2/fr3 because each signal calibrates to its own
+observed range online. The trigger reason is still attributed to the signal with
+the largest severity (for logging).
+
+### Legacy weighted sum (`mode: weighted`, ablation/compat)
+
+The previous formulation is kept for ablation and backward compatibility. Each
+signal is mapped to a severity that is 0 while healthy and 1.0 at a hand-set
+anchor, then summed with fixed weights; a refresh fires when the total reaches
+`threshold`. The per-signal `min_*/max_*` values from the refresh block are
+reused as the normalization anchors.
+
+```yaml
+Training:
+  dust3r:
+    refresh:
+      health_score:
+        mode: weighted
         threshold: 1.0          # < 1 = more sensitive, > 1 = more conservative
         weights:                # default 1.0 each
           opacity_coverage: 1.0
@@ -164,12 +211,11 @@ Training:
           depth_ratio: 1.0
 ```
 
-With `threshold: 1.0` and unit weights, a single signal at its threshold scores
-1.0 and triggers (matching the old OR boundary), while accumulated weak signals
-can also cross the threshold together. The per-signal `min_*/max_*` values from
-the refresh block are reused as the per-signal normalization points.
+With `threshold: 1.0` and unit weights, a single signal at its anchor scores
+1.0 and triggers, while accumulated weak signals can also cross the threshold
+together. This is the mechanism the adaptive score replaces as the default.
 
-In addition to the weighted score, refreshes obey cooldown and budget limits so
+In addition to the score, refreshes obey cooldown and budget limits so
 DUSt3R is never called too densely:
 
 ```yaml
@@ -281,8 +327,11 @@ For config 04, the real improvements over baseline MonoGS are:
 
 - DUSt3R replaces frame-0 pseudo-depth with DUSt3R-derived depth, and the same
   depth-prior path inserts geometry at event-triggered refreshes.
-- A weighted health score decides when DUSt3R is worth calling, instead of a
-  fixed per-keyframe schedule or discrete per-signal thresholds.
+- An adaptive, self-normalizing health score decides when DUSt3R is worth
+  calling, instead of a fixed per-keyframe schedule, discrete per-signal
+  thresholds, or hand-tuned per-signal anchors/weights. Each signal calibrates
+  to its own running distribution, so the same config works across scenes. A
+  legacy fixed weighted sum remains available as an ablation (`mode: weighted`).
 - Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
 - Extra final logs report Gaussian count, model memory, optimizer memory, and
   CUDA memory for evaluation.
