@@ -2,7 +2,7 @@ inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
 
 # Leave-one-out ablation (fr2_xyz) — Improvement 2 removed.
 # Keep the DUSt3R depth prior (frame-0 bootstrap) and pointmap scale sync, but
-# disable the event-driven refresh entirely. This removes the weighted-score
+# disable the event-driven refresh entirely. This removes the loss/depth-score
 # event-selection mechanism: DUSt3R is no longer called again after bootstrap,
 # so the map is never refreshed mid-sequence. Comparing against the full config
 # isolates how much the event-triggered multiview refreshes contribute.

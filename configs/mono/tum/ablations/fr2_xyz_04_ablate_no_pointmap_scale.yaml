@@ -1,7 +1,7 @@
 inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
 
 # Leave-one-out ablation (fr2_xyz) — Improvement 3 removed.
-# Keep the DUSt3R depth prior (bootstrap + event refresh) and the weighted-score
+# Keep the DUSt3R depth prior (bootstrap + event refresh) and the loss/depth-score
 # event selection, but disable both DUSt3R-to-SLAM scale mechanisms for multiview
 # refreshes (baseline-ratio fallback AND synchronized pointmap scaling). Refresh
 # depth is then inserted with scale divisor 1.0.

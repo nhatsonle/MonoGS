@@ -3,7 +3,7 @@ inherit_from: "configs/mono/tum/ablations/fr2_xyz_04_dust3r_event_refresh.yaml"
 # Full proposed method on fr2_xyz, run in SINGLE-THREAD mode.
 # Inherits the complete config-04 system (all three improvements enabled):
 #   1. DUSt3R depth prior (frame-0 bootstrap + event-refresh insertion)
-#   2. Weighted-score event selection for when to call DUSt3R
+#   2. Loss/depth event-score selection for when to call DUSt3R
 #   3. DUSt3R pointmap scale synchronization (baseline_ratio + pointmap_sync)
 #
 # Single-thread mode runs the frontend (tracking) and backend (mapping) in a

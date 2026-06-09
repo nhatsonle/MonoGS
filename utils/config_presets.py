@@ -106,7 +106,7 @@ EVENT_REFRESH = {
                 },
             },
             # --- Event-driven refresh (the core of contribution 2) ---
-            # When the adaptive health score fires, insert fresh DUSt3R multiview
+            # When the loss/depth event score fires, insert fresh DUSt3R multiview
             # depth. These knobs bound HOW OFTEN that can happen and WHICH
             # reference frame is paired with the current one.
             "refresh": {
@@ -123,56 +123,31 @@ EVENT_REFRESH = {
                 "max_baseline": 1.20,
                 # Preferred baseline; candidates are ranked toward this value.
                 "target_baseline": 0.30,
-                # --- Per-signal anchors (legacy "weighted" mode only) ---
-                # In adaptive mode these are NOT used as triggers; they remain
-                # only as the normalization anchors for mode: weighted.
-                # Floor opacity coverage considered "healthy".
-                "min_opacity_coverage": 0.12,
-                # Tracking-loss spike (vs EMA) considered fully unhealthy.
+                # Tracking-loss spike (vs EMA) that reaches event severity 1.0.
                 "max_tracking_loss_ratio": 2.2,
-                # Rendered-depth distribution shift considered fully unhealthy.
+                # Rendered-depth distribution shift that reaches event severity 1.0.
                 "max_depth_change_ratio": 2.0,
-                # EMA decay for the legacy tracking-loss running average (the
-                # adaptive score uses its own stat_decay below).
+                # EMA decay for the tracking-loss running average.
                 "ema_decay": 0.95,
                 # Hard budget: at most this many DUSt3R refreshes for the whole run
                 # (DUSt3R is ~1 s/call, so refreshes are rationed).
                 "max_calls": 3,
-                # Refresh is triggered by a fused ill-health score.
-                #
-                # mode "adaptive" (default, proposed method): each of the four
-                # health signals is converted to a robust z-score against its
-                # own running EMA mean / MAD, squashed through a sigmoid into a
-                # severity in (0, 1), and averaged. The score is therefore a
-                # scene-agnostic probability of ill-health and `threshold` is a
-                # direct probability (0.5 = more anomalous than the running
-                # average). This removes the hand-set per-signal anchors and
-                # per-signal weights entirely.
-                #
-                # mode "weighted" (legacy/ablation): fixed weighted sum of
-                # per-signal severities, each normalized against a hand-set
-                # anchor (min_opacity_coverage / min_visible_gaussian_ratio /
-                # max_tracking_loss_ratio / max_depth_change_ratio); a single
-                # signal at its anchor scores 1.0. Select it with
-                # `mode: weighted` and the `weights` block below.
+                # Refresh is triggered by one event score using only:
+                #   D = max(0, log(depth_ratio) / log(depth_trigger_ratio))
+                #   L = max(0, log(loss_ratio) / log(loss_trigger_ratio))
+                #   score = max(D, L) + joint_bonus * min(D, L)
+                # A score of 1.0 means one signal hit its trigger ratio; the
+                # joint bonus lets moderate depth and tracking changes combine.
                 "health_score": {
-                    "mode": "adaptive",
-                    "threshold": 0.5,
-                    "stat_decay": 0.95,
-                    "temperature": 1.0,
-                    "warmup_updates": 8,
-                    # Only used when mode == "weighted":
-                    "weights": {
-                        "opacity_coverage": 1.0,
-                        "visible_ratio": 1.0,
-                        "loss_ratio": 1.0,
-                        "depth_ratio": 1.0,
-                    },
+                    "threshold": 1.0,
+                    "loss_trigger_ratio": 2.2,
+                    "depth_trigger_ratio": 2.0,
+                    "joint_bonus": 0.25,
                 },
             },
             # Legacy keyframe-gap-driven DUSt3R scheduling (separate from the
             # refresh cooldown above). Setting min_keyframe_gap absurdly high
-            # disables that old fixed-schedule path so the adaptive health score
+            # disables that old fixed-schedule path so the loss/depth event score
             # is the only thing that triggers DUSt3R during the run.
             "optimization": {"min_keyframe_gap": 999999},
         },

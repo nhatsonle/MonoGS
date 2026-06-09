@@ -98,29 +98,18 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_min_baseline = 0.05
         self.dust3r_refresh_max_baseline = 1.50
         self.dust3r_refresh_target_baseline = 0.25
-        self.dust3r_refresh_min_opacity_coverage = 0.18
-        self.dust3r_refresh_opacity_threshold = 0.25
         self.dust3r_refresh_max_tracking_loss_ratio = 1.8
         self.dust3r_refresh_max_depth_change_ratio = 1.8
-        self.dust3r_refresh_min_visible_gaussian_ratio = 0.01
         self.dust3r_refresh_ema_decay = 0.90
         self.dust3r_refresh_max_calls = 0
+        self.dust3r_refresh_event_score_threshold = 1.0
+        self.dust3r_refresh_event_joint_bonus = 0.25
         self.last_dust3r_refresh_frame = -1
         self.last_dust3r_refresh_kf_count = -1
         self.dust3r_refresh_call_count = 0
         self.dust3r_first_refresh_done = False
         self.tracking_loss_ema = None
         self.last_dust3r_refresh_depth = None
-        # Adaptive (self-normalizing) health-score running statistics. Each of the
-        # four signals keeps an EMA mean and an EMA mean-absolute-deviation so the
-        # score is normalized per-scene without any hand-set anchor thresholds.
-        self.health_signal_keys = (
-            "opacity_coverage",
-            "visible_ratio",
-            "loss_ratio",
-            "depth_ratio",
-        )
-        self.reset_adaptive_health_stats()
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -267,217 +256,65 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_target_baseline = float(
             dust3r_refresh.get("target_baseline", self.dust3r_target_baseline)
         )
-        self.dust3r_refresh_min_opacity_coverage = float(
-            dust3r_refresh.get("min_opacity_coverage", 0.18)
-        )
-        self.dust3r_refresh_opacity_threshold = float(
-            dust3r_refresh.get("opacity_threshold", 0.25)
-        )
         self.dust3r_refresh_max_tracking_loss_ratio = float(
             dust3r_refresh.get("max_tracking_loss_ratio", 1.8)
         )
         self.dust3r_refresh_max_depth_change_ratio = float(
             dust3r_refresh.get("max_depth_change_ratio", 1.8)
         )
-        self.dust3r_refresh_min_visible_gaussian_ratio = float(
-            dust3r_refresh.get("min_visible_gaussian_ratio", 0.01)
-        )
         self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
         self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
-        # Weighted-health-score refresh trigger. The four health signals are
-        # fused into a single normalized "ill-health" score; a refresh fires when
-        # the score reaches `threshold`. Each signal is normalized so its
-        # threshold maps to a severity of 1.0. This is the only refresh-trigger
-        # mechanism (the legacy per-signal OR logic has been removed).
         health_score = dust3r_refresh.get("health_score", {})
-        # "adaptive": self-normalizing z-score score (default, no hand anchors).
-        # "weighted": legacy fixed weighted-sum, kept for ablation/compat.
-        self.dust3r_refresh_health_score_mode = str(
-            health_score.get("mode", "adaptive")
-        ).lower()
-        # The threshold is interpreted differently per mode, so pick a sensible
-        # default for each: adaptive scores live in (0, 1) (probability of
-        # ill-health, 0.5 = more anomalous than the running average), while the
-        # weighted sum uses 1.0 = a single signal at its legacy anchor.
-        default_threshold = (
-            0.5 if self.dust3r_refresh_health_score_mode == "adaptive" else 1.0
+        self.dust3r_refresh_event_score_threshold = float(
+            health_score.get("threshold", 1.0)
         )
-        self.dust3r_refresh_health_score_threshold = float(
-            health_score.get("threshold", default_threshold)
+        self.dust3r_refresh_event_joint_bonus = float(
+            health_score.get("joint_bonus", 0.25)
         )
-        # Adaptive-mode knobs. All have safe defaults; none are scene-specific.
-        #   stat_decay  -> EMA decay for the per-signal running mean / MAD
-        #   temperature -> sigmoid softness on the z-score (smaller = sharper)
-        #   warmup      -> #updates before the score is trusted (else forced 0)
-        self.dust3r_refresh_health_score_stat_decay = float(
-            health_score.get("stat_decay", 0.95)
+        self.dust3r_refresh_max_tracking_loss_ratio = float(
+            health_score.get(
+                "loss_trigger_ratio", self.dust3r_refresh_max_tracking_loss_ratio
+            )
         )
-        self.dust3r_refresh_health_score_temperature = float(
-            health_score.get("temperature", 1.0)
+        self.dust3r_refresh_max_depth_change_ratio = float(
+            health_score.get(
+                "depth_trigger_ratio", self.dust3r_refresh_max_depth_change_ratio
+            )
         )
-        self.dust3r_refresh_health_score_warmup = int(
-            health_score.get("warmup_updates", 8)
-        )
-        default_weights = {
-            "opacity_coverage": 1.0,
-            "visible_ratio": 1.0,
-            "loss_ratio": 1.0,
-            "depth_ratio": 1.0,
-        }
-        cfg_weights = health_score.get("weights", {})
-        self.dust3r_refresh_health_score_weights = {
-            key: float(cfg_weights.get(key, val))
-            for key, val in default_weights.items()
-        }
 
-    def reset_adaptive_health_stats(self):
-        """Clear the per-signal running statistics used by the adaptive score."""
-        self.health_signal_mean = {k: None for k in self.health_signal_keys}
-        self.health_signal_mad = {k: None for k in self.health_signal_keys}
-        self.health_stat_updates = 0
+    def dust3r_refresh_event_score(self, health):
+        """Single event score from tracking-loss spike and depth-distribution shift.
 
-    def update_adaptive_health_stats(self, health):
-        """Update the EMA mean / mean-absolute-deviation of each health signal.
+        The score uses only two refresh signals:
+          D = normalized log depth-ratio change
+          L = normalized log tracking-loss ratio spike
 
-        Called once per tracked frame from ``update_tracking_health`` so the
-        statistics reflect the recent distribution of each signal. Robust
-        (median-like) MAD is used instead of variance because it is cheap to
-        maintain online and far less sensitive to the occasional spike that
-        also happens to be what we want to *detect* rather than absorb.
-        """
-        decay = float(np.clip(self.dust3r_refresh_health_score_stat_decay, 0.0, 0.999))
-        for key in self.health_signal_keys:
-            value = float(health[key])
-            mean = self.health_signal_mean[key]
-            if mean is None:
-                self.health_signal_mean[key] = value
-                self.health_signal_mad[key] = 0.0
-                continue
-            new_mean = decay * mean + (1.0 - decay) * value
-            abs_dev = abs(value - new_mean)
-            mad = self.health_signal_mad[key]
-            self.health_signal_mad[key] = decay * mad + (1.0 - decay) * abs_dev
-            self.health_signal_mean[key] = new_mean
-        self.health_stat_updates += 1
-
-    def dust3r_refresh_adaptive_health_score(self, health):
-        """Self-normalizing ill-health score with no hand-tuned anchors/weights.
-
-        Each signal is converted to a robust z-score against its own running
-        EMA mean / MAD, oriented so that "worse" is always positive:
-          - opacity_coverage / visible_ratio: lower is worse -> z = (mean - x)/scale
-          - loss_ratio / depth_ratio:          higher is worse -> z = (x - mean)/scale
-        where ``scale = 1.4826 * MAD`` (the MAD->sigma conversion for a normal
-        distribution). Each z-score is squashed through a sigmoid into a
-        severity in (0, 1) and the score is their *unweighted mean*, so the
-        score itself lives in (0, 1) and ``threshold`` is a direct probability
-        of ill-health (0.5 = "more anomalous than the running average").
-
-        Until ``warmup_updates`` statistics have accumulated the running mean /
-        MAD are not yet trustworthy, so the score is forced to 0 (no refresh)
-        and the per-signal contributions are reported as 0.
-        """
-        eps = 1e-8
-        temperature = max(self.dust3r_refresh_health_score_temperature, eps)
-        # "worse" direction per signal: +1 = higher is worse, -1 = lower is worse.
-        orientation = {
-            "opacity_coverage": -1.0,
-            "visible_ratio": -1.0,
-            "loss_ratio": 1.0,
-            "depth_ratio": 1.0,
-        }
-
-        def sigmoid(x):
-            return 1.0 / (1.0 + np.exp(-np.clip(x, -50.0, 50.0)))
-
-        contributions = {}
-        for key in self.health_signal_keys:
-            mean = self.health_signal_mean[key]
-            mad = self.health_signal_mad[key]
-            if mean is None:
-                contributions[key] = 0.0
-                continue
-            scale = 1.4826 * float(mad) + eps
-            z = orientation[key] * (float(health[key]) - mean) / scale
-            contributions[key] = float(sigmoid(z / temperature))
-
-        if self.health_stat_updates < self.dust3r_refresh_health_score_warmup:
-            score = 0.0
-            contributions = {k: 0.0 for k in self.health_signal_keys}
-        else:
-            score = float(np.mean([contributions[k] for k in self.health_signal_keys]))
-        return score, contributions
-
-    def dust3r_refresh_health_score(self, health):
-        """Dispatch to the configured health-score formulation.
-
-        ``adaptive`` (default) is the self-normalizing z-score score that needs
-        no per-signal anchors or weights. ``weighted`` is the legacy fixed
-        weighted-sum kept for backward compatibility / ablation.
-        """
-        if self.dust3r_refresh_health_score_mode == "adaptive":
-            return self.dust3r_refresh_adaptive_health_score(health)
-        return self.dust3r_refresh_weighted_health_score(health)
-
-    def dust3r_refresh_weighted_health_score(self, health):
-        """Fuse the four tracking-health signals into one ill-health score.
-
-        Each signal is mapped to a per-signal severity that is 0 while healthy
-        and rises to exactly 1.0 at its legacy threshold (a linear ramp from a
-        healthy anchor to the threshold), continuing past 1.0 as the value gets
-        worse:
-          - opacity_coverage / visible_ratio: lower is worse. Healthy anchor is
-            the value being at/above the floor (severity 0); severity reaches 1.0
-            when the value collapses to 0 (i.e. fraction below the floor).
-          - loss_ratio / depth_ratio: higher is worse. Healthy anchor is the
-            nominal ratio of 1.0 (no change); severity reaches 1.0 at the ceiling.
-        Severities are combined as a *weighted sum* (not average). With the
-        default weights of 1.0 this means:
-          - a single signal at its legacy threshold -> score 1.0 (matches the old
-            OR behaviour exactly when threshold=1.0);
-          - several sub-threshold signals accumulate and can cross 1.0 together,
-            which the discrete OR logic would have missed.
-        Returns the total score and the per-signal weighted contributions (for
-        logging and for attributing the trigger reason).
+        ``max(D, L)`` fires for either a depth or tracking emergency, while
+        ``joint_bonus * min(D, L)`` lets two moderate degradations accumulate.
+        A score of 1.0 means one signal reached its configured trigger ratio.
         """
         eps = 1e-8
 
-        def below_floor(value, floor):
-            # 0 when value >= floor (healthy), 1.0 when value == 0 (fully dead),
-            # linear in between. Stays at 1.0 floor of severity (can't exceed 1).
-            if floor <= eps:
-                return 0.0
-            return min(1.0, max(0.0, (floor - float(value)) / floor))
+        def normalized_log_ratio(value, trigger_ratio):
+            value = max(float(value), eps)
+            trigger_ratio = max(float(trigger_ratio), 1.0 + eps)
+            return max(0.0, np.log(value) / np.log(trigger_ratio))
 
-        def above_ceiling(value, ceiling, healthy=1.0):
-            # 0 at the healthy ratio (1.0), 1.0 at the ceiling, grows beyond.
-            span = ceiling - healthy
-            if span <= eps:
-                return 0.0
-            return max(0.0, (float(value) - healthy) / span)
-
+        depth_event = normalized_log_ratio(
+            health["depth_ratio"], self.dust3r_refresh_max_depth_change_ratio
+        )
+        loss_event = normalized_log_ratio(
+            health["loss_ratio"], self.dust3r_refresh_max_tracking_loss_ratio
+        )
+        joint_bonus = max(0.0, self.dust3r_refresh_event_joint_bonus)
+        score = max(depth_event, loss_event) + joint_bonus * min(
+            depth_event, loss_event
+        )
         contributions = {
-            "opacity_coverage": below_floor(
-                health["opacity_coverage"],
-                self.dust3r_refresh_min_opacity_coverage,
-            ),
-            "visible_ratio": below_floor(
-                health["visible_ratio"],
-                self.dust3r_refresh_min_visible_gaussian_ratio,
-            ),
-            "loss_ratio": above_ceiling(
-                health["loss_ratio"],
-                self.dust3r_refresh_max_tracking_loss_ratio,
-            ),
-            "depth_ratio": above_ceiling(
-                health["depth_ratio"],
-                self.dust3r_refresh_max_depth_change_ratio,
-            ),
+            "depth_ratio": depth_event,
+            "loss_ratio": loss_event,
         }
-        weights = self.dust3r_refresh_health_score_weights
-        weighted = {k: contributions[k] * weights[k] for k in contributions}
-        score = sum(weighted.values())
-        return score, weighted
+        return score, contributions
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -565,7 +402,6 @@ class FrontEnd(mp.Process):
             self.dust3r_first_refresh_done = False
             self.tracking_loss_ema = None
             self.last_dust3r_refresh_depth = None
-            self.reset_adaptive_health_stats()
 
     def should_use_dust3r_initialization(self):
         return (
@@ -964,7 +800,7 @@ class FrontEnd(mp.Process):
             )
         return best_payload
 
-    def update_tracking_health(self, render_pkg, curr_visibility):
+    def update_tracking_health(self, render_pkg, _curr_visibility):
         tracking_loss = render_pkg.get("tracking_loss", None)
         if tracking_loss is None:
             tracking_loss = 0.0
@@ -977,24 +813,6 @@ class FrontEnd(mp.Process):
             loss_ratio = tracking_loss / max(prev_ema, 1e-8)
             decay = float(np.clip(self.dust3r_refresh_ema_decay, 0.0, 0.999))
             self.tracking_loss_ema = decay * prev_ema + (1.0 - decay) * tracking_loss
-
-        opacity = render_pkg.get("opacity", None)
-        if opacity is None:
-            opacity_coverage = 1.0
-        else:
-            opacity_coverage = float(
-                (opacity.detach() > self.dust3r_refresh_opacity_threshold)
-                .float()
-                .mean()
-                .item()
-            )
-
-        if curr_visibility.numel() == 0:
-            visible_ratio = 0.0
-        else:
-            visible_ratio = float(
-                curr_visibility.count_nonzero().item() / curr_visibility.numel()
-            )
 
         median_depth = render_pkg.get("median_depth", self.median_depth)
         if hasattr(median_depth, "detach"):
@@ -1016,15 +834,9 @@ class FrontEnd(mp.Process):
         health = {
             "tracking_loss": tracking_loss,
             "loss_ratio": loss_ratio,
-            "opacity_coverage": opacity_coverage,
-            "visible_ratio": visible_ratio,
             "median_depth": median_depth,
             "depth_ratio": depth_ratio,
         }
-        # Feed the adaptive score's running statistics every tracked frame so
-        # they reflect the recent per-scene distribution of each signal. The
-        # weighted (legacy) mode ignores these, so the update is harmless there.
-        self.update_adaptive_health_stats(health)
         return health
 
     def should_trigger_dust3r_refresh(self, cur_frame_idx, health):
@@ -1064,25 +876,23 @@ class FrontEnd(mp.Process):
         if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
             return False, None
 
-        score, contributions = self.dust3r_refresh_health_score(health)
-        if score >= self.dust3r_refresh_health_score_threshold:
-            # Attribute the trigger to the signal contributing the most.
-            reason_signal = max(contributions, key=contributions.get)
-            reason_map = {
-                "opacity_coverage": "low_opacity_coverage",
-                "visible_ratio": "low_visible_gaussian_ratio",
-                "loss_ratio": "tracking_loss_spike",
-                "depth_ratio": "depth_distribution_shift",
-            }
+        score, contributions = self.dust3r_refresh_event_score(health)
+        if score >= self.dust3r_refresh_event_score_threshold:
+            if contributions["depth_ratio"] > 0 and contributions["loss_ratio"] > 0:
+                reason = "joint_depth_tracking_event"
+            elif contributions["depth_ratio"] >= contributions["loss_ratio"]:
+                reason = "depth_distribution_shift"
+            else:
+                reason = "tracking_loss_spike"
             Log(
-                f"DUSt3R refresh health score [{self.dust3r_refresh_health_score_mode}] "
-                f"{score:.3f} >= {self.dust3r_refresh_health_score_threshold:.3f} "
-                f"(opacity={contributions['opacity_coverage']:.3f}, "
-                f"visible={contributions['visible_ratio']:.3f}, "
-                f"loss={contributions['loss_ratio']:.3f}, "
-                f"depth={contributions['depth_ratio']:.3f})"
+                "DUSt3R refresh event score "
+                f"{score:.3f} >= {self.dust3r_refresh_event_score_threshold:.3f} "
+                f"(D={contributions['depth_ratio']:.3f}, "
+                f"L={contributions['loss_ratio']:.3f}, "
+                f"depth_ratio={health['depth_ratio']:.3f}, "
+                f"loss_ratio={health['loss_ratio']:.3f})"
             )
-            return True, reason_map[reason_signal]
+            return True, reason
         return False, None
 
     def prepare_dust3r_refresh_payload(self, cur_frame_idx, reason):
@@ -1714,8 +1524,6 @@ class FrontEnd(mp.Process):
                             Log(
                                 f"Requesting DUSt3R refresh at frame {cur_frame_idx}: "
                                 f"{refresh_reason}, loss_ratio={health['loss_ratio']:.3f}, "
-                                f"opacity={health['opacity_coverage']:.3f}, "
-                                f"visible={health['visible_ratio']:.3f}, "
                                 f"depth_ratio={health['depth_ratio']:.3f}"
                             )
                             dust3r_payload = self.prepare_dust3r_refresh_payload(
