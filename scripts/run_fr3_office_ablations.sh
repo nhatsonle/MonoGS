@@ -2,8 +2,8 @@
 set -euo pipefail
 
 CONFIGS=(
-  "configs/mono/tum/ablations/fr3_office_00_monogs.yaml"
-  "configs/mono/tum/ablations/fr3_office_01_monogs_lifecycle.yaml"
+  "configs/mono/tum/ablations/fr3_office_00_3rgs.yaml"
+  "configs/mono/tum/ablations/fr3_office_01_3rgs_lifecycle.yaml"
   "configs/mono/tum/ablations/fr3_office_02_dust3r_pointmap_no_scale.yaml"
   "configs/mono/tum/ablations/fr3_office_03_dust3r_pointmap_scaled.yaml"
   "configs/mono/tum/ablations/fr3_office_04_dust3r_event_refresh.yaml"

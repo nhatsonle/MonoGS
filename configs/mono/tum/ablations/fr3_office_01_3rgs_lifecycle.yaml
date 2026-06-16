@@ -1,4 +1,4 @@
-inherit_from: "configs/mono/tum/ablations/fr3_office_00_monogs.yaml"
+inherit_from: "configs/mono/tum/ablations/fr3_office_00_3rgs.yaml"
 
 Training:
   lifecycle:

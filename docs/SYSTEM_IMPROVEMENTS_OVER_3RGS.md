@@ -25,7 +25,7 @@ preset (`event_refresh` in `utils/config_presets.py`). The YAML file itself only
 opts in:
 
 ```yaml
-inherit_from: "configs/mono/tum/ablations/fr3_office_00_monogs.yaml"
+inherit_from: "configs/mono/tum/ablations/fr3_office_00_3rgs.yaml"
 preset: event_refresh
 ```
 
