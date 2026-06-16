@@ -23,7 +23,10 @@ Training:
     batch_size: 1
 
 Results:
-  save_results: False
-  use_gui: True
-  eval_rendering: False
+  # Headless run that still reports PSNR/SSIM/LPIPS and dumps rendered images.
+  save_results: True      # needed so a save_dir exists for the rendered images
+  save_trj: False         # no GT poses -> skip periodic ATE logging during the run
+  use_gui: False          # no GUI window
+  eval_rendering: True    # after SLAM: render kf/non-kf frames, compute PSNR, save images
+  color_refinement: True  # extra global color pass -> "Before"/"After" metrics (set False to skip/speed up)
   use_wandb: False

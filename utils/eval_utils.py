@@ -75,7 +75,19 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est.align(traj_ref, correct_scale=monocular)
+    try:
+        traj_est.align(traj_ref, correct_scale=monocular)
+    except Exception as e:
+        # A degenerate reference trajectory (e.g. identity/placeholder GT poses
+        # used for a self-recorded monocular run without ground truth) makes the
+        # Umeyama alignment ill-posed ("Degenerate covariance rank"). Trajectory
+        # logging must never kill the SLAM run, so warn and skip the ATE here.
+        Log(
+            f"Skipping ATE: trajectory alignment failed ({e}). This is expected "
+            "when no valid ground-truth poses are available.",
+            tag="Eval",
+        )
+        return None
     traj_est_aligned = traj_est
 
     ## RMSE
@@ -158,7 +170,8 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         label=label_evo,
         monocular=monocular,
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
+    if ate is not None:
+        wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
     return ate
 
 
