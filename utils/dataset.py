@@ -539,6 +539,43 @@ class StereoDataset(BaseDataset):
         return image, depth, pose
 
 
+class StrayScannerParser:
+    """Parser for self-recorded monocular sequences (e.g. the iOS "Stray
+    Scanner" / ARKit export). Reads RGB frames extracted from the recorded
+    video into an ``rgb/`` folder. Ground-truth poses are not required for a
+    pure monocular run (the frontend tracks from a constant-velocity prediction
+    and only anchors frame 0), so identity poses are used unless a GT file is
+    explicitly provided. The accompanying LiDAR ``depth/`` and ``confidence/``
+    folders are intentionally ignored in monocular mode.
+    """
+
+    def __init__(self, input_folder):
+        self.input_folder = input_folder
+        rgb_folder = os.path.join(input_folder, "rgb")
+        self.color_paths = []
+        for ext in ("*.jpg", "*.jpeg", "*.png"):
+            self.color_paths.extend(glob.glob(os.path.join(rgb_folder, ext)))
+        self.color_paths = sorted(self.color_paths)
+        self.n_img = len(self.color_paths)
+        if self.n_img == 0:
+            raise FileNotFoundError(
+                f"No RGB frames found in {rgb_folder}. Extract the recorded "
+                "video into an 'rgb/' folder, e.g.:\n"
+                f"  ffmpeg -i {input_folder}/rgb.mp4 -vf scale=640:480 "
+                f"-start_number 0 {rgb_folder}/%06d.jpg"
+            )
+        # Monocular run without ATE evaluation: anchor frame 0 at the world
+        # origin and let tracking estimate the rest. world-to-camera = identity.
+        self.poses = [np.eye(4) for _ in range(self.n_img)]
+        self.frames = [
+            {
+                "file_path": self.color_paths[i],
+                "transform_matrix": self.poses[i].tolist(),
+            }
+            for i in range(self.n_img)
+        ]
+
+
 class TUMDataset(MonocularDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
@@ -550,6 +587,19 @@ class TUMDataset(MonocularDataset):
         self.num_imgs = min(num_frames, parser.n_img)
         self.color_paths = parser.color_paths[: self.num_imgs]
         self.depth_paths = parser.depth_paths[: self.num_imgs]
+        self.poses = parser.poses[: self.num_imgs]
+
+
+class StrayScannerDataset(MonocularDataset):
+    def __init__(self, args, path, config):
+        super().__init__(args, path, config)
+        dataset_path = config["Dataset"]["dataset_path"]
+        parser = StrayScannerParser(dataset_path)
+        num_frames = config["Dataset"].get("num_frames", parser.n_img)
+        if num_frames is None or num_frames <= 0:
+            num_frames = parser.n_img
+        self.num_imgs = min(num_frames, parser.n_img)
+        self.color_paths = parser.color_paths[: self.num_imgs]
         self.poses = parser.poses[: self.num_imgs]
 
 
@@ -755,5 +805,7 @@ def load_dataset(args, path, config):
         return WaymoDataset(args, path, config)
     elif config["Dataset"]["type"] == "realsense":
         return RealsenseDataset(args, path, config)
+    elif config["Dataset"]["type"] == "stray_scanner":
+        return StrayScannerDataset(args, path, config)
     else:
         raise ValueError("Unknown dataset type")

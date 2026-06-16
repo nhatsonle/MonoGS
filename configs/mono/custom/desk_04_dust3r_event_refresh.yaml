@@ -1,0 +1,29 @@
+inherit_from: "configs/mono/custom/desk.yaml"
+
+# Config 04 — DUSt3R single-view init + event-driven refresh, on the
+# self-recorded desk sequence. Same shared tuning as the TUM fr2/fr3 config-04
+# runs via the "event_refresh" preset (utils/config_presets.py); only the
+# dataset/calibration differ (inherited from desk.yaml).
+#
+# NOTE: the "event_refresh" preset ships with dust3r.enabled = False (its
+# documented "master switch" default). The TUM config-04 YAMLs never flip it
+# back on, so as-shipped they run as baseline MonoGS. Here we enable it
+# explicitly so DUSt3R actually drives initialization + refresh.
+preset: event_refresh
+
+Training:
+  mapping_itr_num: 150
+  lifecycle:
+    enabled: False
+  dust3r:
+    enabled: True
+    checkpoint: "checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"
+    device: "cuda"
+    image_size: 512
+    batch_size: 1
+
+Results:
+  save_results: False
+  use_gui: True
+  eval_rendering: False
+  use_wandb: False
