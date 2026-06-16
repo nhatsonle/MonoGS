@@ -221,20 +221,19 @@ depth trong khong gian doi bat thuong.
 
 ### 4.3. Event Score Thong Nhat
 
-Hai ti le tren duoc chuan hoa bang log-ratio doi xung va gop thanh mot score duy
-nhat:
+Hai ti le tren duoc chuan hoa tuyen tinh theo muc vuot khoi trang thai binh
+thuong va gop thanh mot score duy nhat:
 
 ```text
-D_t = max(0, log(depth_ratio_t) / log(T_depth))
-L_t = max(0, log(loss_ratio_t)  / log(T_loss))
+D_t = max(0, (depth_ratio_t - 1) / (T_depth - 1))
+L_t = max(0, (loss_ratio_t  - 1) / (T_loss  - 1))
 
-score_t = max(D_t, L_t) + lambda_joint * min(D_t, L_t)
+score_t = max(D_t, L_t)
 ```
 
 `D_t = 1` khi depth ratio cham `T_depth`; `L_t = 1` khi loss ratio cham
 `T_loss`. Thanh phan `max(D_t, L_t)` cho phep mot trong hai su kien rieng le goi
-DUSt3R, con `lambda_joint * min(D_t, L_t)` cong them diem khi tracking va depth
-cung xau vua phai. Refresh kich hoat khi `score_t >= threshold`.
+DUSt3R. Refresh kich hoat khi `score_t >= threshold`.
 
 ```yaml
 Training:
@@ -242,24 +241,22 @@ Training:
     refresh:
       health_score:
         threshold: 1.0
+        rearm_threshold: 0.5
         loss_trigger_ratio: 2.2
         depth_trigger_ratio: 2.0
-        joint_bonus: 0.25
 ```
 
-### 4.4. Gioi Han Tan Suat Goi DUSt3R
+### 4.4. Rising-Edge Trigger De Tranh Goi Lap
 
-Ngoai event score, refresh con phai thoa cac dieu kien cooldown va ngan sach
-de DUSt3R khong bao gio bi goi qua day:
+Refresh khong con dung cooldown theo frame/keyframe hay ngan sach `max_calls`.
+Thay vao do, frontend xem event score nhu mot tin hieu co trang thai
+armed/disarmed:
 
-```yaml
-min_frame_gap: 50
-min_keyframe_gap: 3
-max_calls: 3
-```
-
-Nghia la sau mot lan refresh, he thong phai doi it nhat 50 frame va 3 keyframe
-truoc khi duoc refresh tiep. Toan bo run chi duoc goi refresh toi da 3 lan.
+- neu trigger dang armed va `score_t >= threshold`, he thong goi DUSt3R mot lan
+  va chuyen sang disarmed;
+- khi `score_t <= rearm_threshold`, trigger duoc armed lai;
+- neu score van cao dai dang, he thong khong goi lap DUSt3R cho cung mot su
+  kien xau.
 
 Config 04 cung ep mot lan refresh multiview som sau bootstrap:
 
@@ -411,7 +408,7 @@ For each new frame t
   -> neu la keyframe:
        them vao local window
        backend local mapping + BA
-  -> neu event score >= threshold va qua cooldown:
+  -> neu event score >= threshold va trigger dang armed:
        chon reference keyframe hop le
        DUSt3R(frame_t, frame_ref)
        pointmap scale synchronization
@@ -434,12 +431,9 @@ DUSt3R:
   init median target depth: 2.0 m
   refresh enabled: True
   refresh event_score threshold: 1.0
+  refresh rearm_threshold: 0.5
   refresh loss_trigger_ratio: 2.2
   refresh depth_trigger_ratio: 2.0
-  refresh joint_bonus: 0.25
-  refresh max_calls: 3
-  refresh min_frame_gap: 50
-  refresh min_keyframe_gap: 3
   pointmap_sync: True
   baseline_ratio: True
 ```
@@ -463,7 +457,7 @@ So voi MonoGS monocular baseline, config 04 thay doi cac diem sau:
 | Khoi tao depth | pseudo-depth gan 2 m | DUSt3R single-view depth prior |
 | Frame dau | backproject pseudo-depth | backproject DUSt3R depth |
 | Refresh hinh hoc | khong co | event-triggered DUSt3R multiview depth |
-| Quyet dinh goi DUSt3R | khong co | loss/depth event score + cooldown |
+| Quyet dinh goi DUSt3R | khong co | loss/depth event score + rising-edge rearm |
 | Dong bo scale | khong ap dung | baseline-ratio + pointmap sync |
 | Tracking | RGB photometric tracking | giu nguyen RGB photometric tracking |
 | Mapping | RGB local mapping/BA | giu nguyen RGB local mapping/BA |
@@ -490,8 +484,8 @@ Phuong phap config 04 co the duoc tom tat thanh ba dong gop chinh:
    DUSt3R-derived depth cho khoi tao Gaussian ngay tu frame dau tien, va tai su
    dung cung duong depth prior de chen hinh hoc luc refresh.
 2. Co che lua chon su kien goi DUSt3R bang mot event score thong nhat tu
-   `loss_ratio` va `depth_ratio`, phat hien ca tracking loss spike, depth shift,
-   va truong hop hai tin hieu cung xau vua phai, thay cho lich co dinh hay cac
+   `loss_ratio` va `depth_ratio`, phat hien tracking loss spike hoac depth
+   shift bang mot cong thuc tuyen tinh don gian thay cho lich co dinh hay cac
    tin hieu roi rac.
 3. Co che dong bo scale cua pointmap DUSt3R voi SLAM map (baseline-ratio +
    pointmap sync) de depth chen vao map dung scale.

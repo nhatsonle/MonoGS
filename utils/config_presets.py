@@ -107,14 +107,10 @@ EVENT_REFRESH = {
             },
             # --- Event-driven refresh (the core of contribution 2) ---
             # When the loss/depth event score fires, insert fresh DUSt3R multiview
-            # depth. These knobs bound HOW OFTEN that can happen and WHICH
-            # reference frame is paired with the current one.
+            # depth. A rising-edge trigger prevents repeated calls while the same
+            # event remains active; the remaining knobs choose the reference frame.
             "refresh": {
                 "enabled": True,
-                # Cooldown: at least this many frames since the last refresh.
-                "min_frame_gap": 50,
-                # Cooldown: at least this many new keyframes since the last refresh.
-                "min_keyframe_gap": 3,
                 # How many candidate reference keyframes to consider per refresh.
                 "candidate_pool": 6,
                 # Acceptable baseline window (SLAM units) for the refresh pair.
@@ -129,26 +125,25 @@ EVENT_REFRESH = {
                 "max_depth_change_ratio": 2.0,
                 # EMA decay for the tracking-loss running average.
                 "ema_decay": 0.95,
-                # Hard budget: at most this many DUSt3R refreshes for the whole run
-                # (DUSt3R is ~1 s/call, so refreshes are rationed).
-                "max_calls": 3,
-                # Refresh is triggered by one event score using only:
-                #   D = max(0, log(depth_ratio) / log(depth_trigger_ratio))
-                #   L = max(0, log(loss_ratio) / log(loss_trigger_ratio))
-                #   score = max(D, L) + joint_bonus * min(D, L)
+                # Refresh is triggered by one simple event score:
+                #   D = max(0, (depth_ratio - 1) / (depth_trigger_ratio - 1))
+                #   L = max(0, (loss_ratio - 1) / (loss_trigger_ratio - 1))
+                #   score = max(D, L)
                 # A score of 1.0 means one signal hit its trigger ratio; the
-                # joint bonus lets moderate depth and tracking changes combine.
+                # larger of the two normalized events drives the decision.
+                # After one trigger, the event must settle below rearm_threshold
+                # before another DUSt3R refresh can fire.
                 "health_score": {
                     "threshold": 1.0,
+                    "rearm_threshold": 0.5,
                     "loss_trigger_ratio": 2.2,
                     "depth_trigger_ratio": 2.0,
-                    "joint_bonus": 0.25,
                 },
             },
             # Legacy keyframe-gap-driven DUSt3R scheduling (separate from the
-            # refresh cooldown above). Setting min_keyframe_gap absurdly high
-            # disables that old fixed-schedule path so the loss/depth event score
-            # is the only thing that triggers DUSt3R during the run.
+            # refresh trigger above). Setting min_keyframe_gap absurdly high
+            # disables that old fixed-schedule path so the loss/depth rising-edge
+            # event score is the only thing that triggers DUSt3R during the run.
             "optimization": {"min_keyframe_gap": 999999},
         },
         # --- Gaussian lifecycle controller ---

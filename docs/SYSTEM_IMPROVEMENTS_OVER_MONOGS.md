@@ -69,13 +69,13 @@ Training:
         enabled: True
     refresh:
       enabled: True
-      min_frame_gap: 50
-      min_keyframe_gap: 3
       candidate_pool: 6
       min_baseline: 0.08
       max_baseline: 1.20
       target_baseline: 0.30
-      max_calls: 3
+      health_score:
+        threshold: 1.0
+        rearm_threshold: 0.5
 ```
 
 ### Frame-0 Bootstrap
@@ -147,19 +147,19 @@ repair: tracking loss spikes and depth distribution shifts.
 
 ### Loss/Depth Event Score
 
-The two ratios are normalized with symmetric log-ratios and fused into one score:
+The two ratios are linearly normalized by how far they exceed the normal value
+of `1.0`, then fused into one score:
 
 ```text
-D_t = max(0, log(depth_ratio_t) / log(T_depth))
-L_t = max(0, log(loss_ratio_t)  / log(T_loss))
+D_t = max(0, (depth_ratio_t - 1) / (T_depth - 1))
+L_t = max(0, (loss_ratio_t  - 1) / (T_loss  - 1))
 
-score_t = max(D_t, L_t) + lambda_joint * min(D_t, L_t)
+score_t = max(D_t, L_t)
 ```
 
 `D_t = 1` when the depth ratio reaches `T_depth`; `L_t = 1` when the tracking
 loss ratio reaches `T_loss`. The `max(D_t, L_t)` term catches either individual
-event, and `lambda_joint * min(D_t, L_t)` adds a small bonus when both tracking
-and depth degrade moderately. A refresh fires when `score_t >= threshold`.
+event.
 
 ```yaml
 Training:
@@ -167,19 +167,16 @@ Training:
     refresh:
       health_score:
         threshold: 1.0
+        rearm_threshold: 0.5
         loss_trigger_ratio: 2.2
         depth_trigger_ratio: 2.0
-        joint_bonus: 0.25
 ```
 
-In addition to the score, refreshes obey cooldown and budget limits so
-DUSt3R is never called too densely:
-
-```yaml
-min_frame_gap: 50
-min_keyframe_gap: 3
-max_calls: 3
-```
+A refresh fires on the rising edge: when the trigger is armed and
+`score_t >= threshold`. After that attempt, the trigger is disarmed and cannot
+fire again until the score settles to `rearm_threshold` or below. This replaces
+fixed frame cooldowns and hard per-run call budgets while still preventing
+repeated DUSt3R calls during one persistent bad episode.
 
 One forced early multiview refresh after bootstrap (`force_after_bootstrap: True`)
 upgrades the single-view frame-0 depth with a higher-quality multiview pointmap
@@ -286,8 +283,7 @@ For config 04, the real improvements over baseline MonoGS are:
   depth-prior path inserts geometry at event-triggered refreshes.
 - A single loss/depth event score decides when DUSt3R is worth calling, instead
   of a fixed per-keyframe schedule or four separate health signals. It detects
-  tracking-loss spikes, depth-distribution shifts, and moderate joint
-  degradation.
+  tracking-loss spikes or depth-distribution shifts with a simple linear score.
 - Pointmap sync aligns DUSt3R multiview depth scale to the SLAM map scale.
 - Extra final logs report Gaussian count, model memory, optimizer memory, and
   CUDA memory for evaluation.

@@ -92,8 +92,6 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_enabled = False
         self.dust3r_refresh_backproject_depth = True
         self.dust3r_refresh_force_after_bootstrap = True
-        self.dust3r_refresh_min_frame_gap = 30
-        self.dust3r_refresh_min_keyframe_gap = 2
         self.dust3r_refresh_candidate_pool = 4
         self.dust3r_refresh_min_baseline = 0.05
         self.dust3r_refresh_max_baseline = 1.50
@@ -101,9 +99,9 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_max_tracking_loss_ratio = 1.8
         self.dust3r_refresh_max_depth_change_ratio = 1.8
         self.dust3r_refresh_ema_decay = 0.90
-        self.dust3r_refresh_max_calls = 0
         self.dust3r_refresh_event_score_threshold = 1.0
-        self.dust3r_refresh_event_joint_bonus = 0.25
+        self.dust3r_refresh_rearm_threshold = 0.5
+        self.dust3r_refresh_armed = True
         self.last_dust3r_refresh_frame = -1
         self.last_dust3r_refresh_kf_count = -1
         self.dust3r_refresh_call_count = 0
@@ -238,12 +236,6 @@ class FrontEnd(mp.Process):
         self.dust3r_refresh_force_after_bootstrap = bool(
             dust3r_refresh.get("force_after_bootstrap", True)
         )
-        self.dust3r_refresh_min_frame_gap = int(
-            dust3r_refresh.get("min_frame_gap", 30)
-        )
-        self.dust3r_refresh_min_keyframe_gap = int(
-            dust3r_refresh.get("min_keyframe_gap", 2)
-        )
         self.dust3r_refresh_candidate_pool = int(
             dust3r_refresh.get("candidate_pool", self.dust3r_candidate_pool)
         )
@@ -263,14 +255,25 @@ class FrontEnd(mp.Process):
             dust3r_refresh.get("max_depth_change_ratio", 1.8)
         )
         self.dust3r_refresh_ema_decay = float(dust3r_refresh.get("ema_decay", 0.90))
-        self.dust3r_refresh_max_calls = int(dust3r_refresh.get("max_calls", 0))
         health_score = dust3r_refresh.get("health_score", {})
         self.dust3r_refresh_event_score_threshold = float(
             health_score.get("threshold", 1.0)
         )
-        self.dust3r_refresh_event_joint_bonus = float(
-            health_score.get("joint_bonus", 0.25)
+        self.dust3r_refresh_rearm_threshold = float(
+            health_score.get(
+                "rearm_threshold", 0.5 * self.dust3r_refresh_event_score_threshold
+            )
         )
+        if self.dust3r_refresh_event_score_threshold > 0.0:
+            self.dust3r_refresh_rearm_threshold = float(
+                np.clip(
+                    self.dust3r_refresh_rearm_threshold,
+                    0.0,
+                    0.999 * self.dust3r_refresh_event_score_threshold,
+                )
+            )
+        else:
+            self.dust3r_refresh_rearm_threshold = 0.0
         self.dust3r_refresh_max_tracking_loss_ratio = float(
             health_score.get(
                 "loss_trigger_ratio", self.dust3r_refresh_max_tracking_loss_ratio
@@ -286,30 +289,26 @@ class FrontEnd(mp.Process):
         """Single event score from tracking-loss spike and depth-distribution shift.
 
         The score uses only two refresh signals:
-          D = normalized log depth-ratio change
-          L = normalized log tracking-loss ratio spike
+          D = normalized depth-ratio excess
+          L = normalized tracking-loss-ratio excess
 
-        ``max(D, L)`` fires for either a depth or tracking emergency, while
-        ``joint_bonus * min(D, L)`` lets two moderate degradations accumulate.
-        A score of 1.0 means one signal reached its configured trigger ratio.
+        ``max(D, L)`` fires when either signal reaches its configured trigger
+        ratio. A score of 1.0 means one signal reached that trigger ratio.
         """
         eps = 1e-8
 
-        def normalized_log_ratio(value, trigger_ratio):
-            value = max(float(value), eps)
+        def normalized_excess_ratio(value, trigger_ratio):
+            value = max(float(value), 1.0)
             trigger_ratio = max(float(trigger_ratio), 1.0 + eps)
-            return max(0.0, np.log(value) / np.log(trigger_ratio))
+            return max(0.0, (value - 1.0) / (trigger_ratio - 1.0))
 
-        depth_event = normalized_log_ratio(
+        depth_event = normalized_excess_ratio(
             health["depth_ratio"], self.dust3r_refresh_max_depth_change_ratio
         )
-        loss_event = normalized_log_ratio(
+        loss_event = normalized_excess_ratio(
             health["loss_ratio"], self.dust3r_refresh_max_tracking_loss_ratio
         )
-        joint_bonus = max(0.0, self.dust3r_refresh_event_joint_bonus)
-        score = max(depth_event, loss_event) + joint_bonus * min(
-            depth_event, loss_event
-        )
+        score = max(depth_event, loss_event)
         contributions = {
             "depth_ratio": depth_event,
             "loss_ratio": loss_event,
@@ -400,6 +399,7 @@ class FrontEnd(mp.Process):
             self.last_dust3r_refresh_kf_count = -1
             self.dust3r_refresh_call_count = 0
             self.dust3r_first_refresh_done = False
+            self.dust3r_refresh_armed = True
             self.tracking_loss_ema = None
             self.last_dust3r_refresh_depth = None
 
@@ -848,36 +848,26 @@ class FrontEnd(mp.Process):
             or len(self.current_window) == 0
         ):
             return False, None
-        if self.dust3r_refresh_max_calls > 0 and (
-            self.dust3r_refresh_call_count >= self.dust3r_refresh_max_calls
-        ):
-            return False, None
-
-        frame_gap = (
-            cur_frame_idx - self.last_dust3r_refresh_frame
-            if self.last_dust3r_refresh_frame >= 0
-            else cur_frame_idx + 1
-        )
-        keyframe_gap = (
-            len(self.kf_indices) - self.last_dust3r_refresh_kf_count
-            if self.last_dust3r_refresh_kf_count >= 0
-            else len(self.kf_indices)
-        )
-
         if (
             self.dust3r_refresh_force_after_bootstrap
             and not self.dust3r_first_refresh_done
             and cur_frame_idx > self.current_window[-1]
         ):
+            self.dust3r_refresh_armed = False
             return True, "initial_multiview"
 
-        if frame_gap < self.dust3r_refresh_min_frame_gap:
-            return False, None
-        if keyframe_gap < self.dust3r_refresh_min_keyframe_gap:
+        score, contributions = self.dust3r_refresh_event_score(health)
+        if not self.dust3r_refresh_armed:
+            if score <= self.dust3r_refresh_rearm_threshold:
+                self.dust3r_refresh_armed = True
+                Log(
+                    "DUSt3R refresh re-armed: "
+                    f"score {score:.3f} <= {self.dust3r_refresh_rearm_threshold:.3f}"
+                )
             return False, None
 
-        score, contributions = self.dust3r_refresh_event_score(health)
         if score >= self.dust3r_refresh_event_score_threshold:
+            self.dust3r_refresh_armed = False
             if contributions["depth_ratio"] > 0 and contributions["loss_ratio"] > 0:
                 reason = "joint_depth_tracking_event"
             elif contributions["depth_ratio"] >= contributions["loss_ratio"]:
