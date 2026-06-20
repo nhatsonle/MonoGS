@@ -1027,20 +1027,18 @@ class FrontEnd(mp.Process):
         metric_scales = solve_scales(mask)
         if metric_scales is None:
             return [fallback_scale_divisor, fallback_scale_divisor]
-        for _ in range(2):
-            residual = np.linalg.norm(
-                metric_scales[0] * vec0 - metric_scales[1] * vec1 - baseline,
-                axis=1,
-            )
-            median = np.median(residual)
-            mad = np.median(np.abs(residual - median)) + 1e-8
-            mask = residual < median + 3.0 * 1.4826 * mad
-            if mask.sum() < 32:
-                break
+
+        residual = np.linalg.norm(
+            metric_scales[0] * vec0 - metric_scales[1] * vec1 - baseline,
+            axis=1,
+        )
+        median = np.median(residual)
+        mad = np.median(np.abs(residual - median)) + 1e-8
+        mask = residual < median + 3.0 * 1.4826 * mad
+        if mask.sum() >= 32:
             refined = solve_scales(mask)
-            if refined is None:
-                break
-            metric_scales = refined
+            if refined is not None:
+                metric_scales = refined
 
         if (
             not np.isfinite(metric_scales).all()
