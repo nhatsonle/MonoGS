@@ -60,7 +60,7 @@ There is **no automated test suite**. Validate a change by running the smallest 
 - `frontend_queue` (backend→frontend): `["sync_backend", gaussians, ...]`, tagged `"init"`/`"keyframe"` syncs that hand the updated Gaussian model back.
 - `q_main2vis` / `q_vis2main`: GUI packets (`GaussianPacket`) and pause flags.
 
-Both `run()` loops are the place to understand control flow: `FrontEnd.run` (`utils/slam_frontend.py:1347`) and `BackEnd.run` (`utils/slam_backend.py:1026`).
+Both `run()` loops are the place to understand control flow: `FrontEnd.run` (`utils/slam_frontend.py:1345`) and `BackEnd.run` (`utils/slam_backend.py:1026`).
 
 ### The DUSt3R prior path (the actual contribution)
 Three changes layered over baseline MonoGS — see the design docs for the math:
@@ -79,4 +79,4 @@ Configs use a two-axis composition resolved by `utils/config_utils.py::load_conf
 
 Merge precedence (highest wins): **the file's own keys > preset > inherited chain**. So a per-sequence config-04 YAML shrinks to `inherit_from` + `preset: event_refresh` + a few scene-specific overrides (dataset path/calibration, `mapping_itr_num`). Only sequence-independent (unitless/structural) params belong in a preset; scale-sensitive per-scene knobs stay in YAML — though for TUM the scale-sync mechanisms let the same DUSt3R values work across fr1/fr2/fr3. `update_recursive` does a deep merge, so partial nested overrides are fine.
 
-Datasets are dispatched by `Dataset.type` in `utils/dataset.py::load_dataset` (`tum`/`replica`/`euroc`/`realsense`/`kitti`/`waymo`); sensor behavior keys off `Dataset.sensor_type` (`monocular`/`stereo`/`depth`).
+Datasets are dispatched by `Dataset.type` in `utils/dataset.py::load_dataset` (`tum`/`replica`/`euroc`/`realsense`/`kitti`/`waymo`/`stray_scanner`); sensor behavior keys off `Dataset.sensor_type` (`monocular`/`stereo`/`depth`).
